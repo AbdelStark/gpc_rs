@@ -1,0 +1,20 @@
+[package]
+name = "gpc-eval"
+description = "Trajectory ranking and optimization evaluation for GPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gpc-core = { path = "../gpc-core" }
+gpc-policy = { path = "../gpc-policy" }
+gpc-world = { path = "../gpc-world" }
+burn = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+burn-ndarray = { workspace = true }

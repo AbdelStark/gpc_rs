@@ -1,0 +1,19 @@
+[package]
+name = "gpc-train"
+description = "Training orchestration for GPC models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gpc-core = { path = "../gpc-core" }
+gpc-policy = { path = "../gpc-policy" }
+gpc-world = { path = "../gpc-world" }
+burn = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+burn-ndarray = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "gpc-policy"
+description = "Diffusion-based action policy for GPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gpc-core = { path = "../gpc-core" }
+burn = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+burn-ndarray = { workspace = true }

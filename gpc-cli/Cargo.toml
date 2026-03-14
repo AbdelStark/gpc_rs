@@ -1,0 +1,24 @@
+[package]
+name = "gpc-cli"
+description = "CLI interface for GPC operations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gpc"
+path = "src/main.rs"
+
+[dependencies]
+gpc-core = { path = "../gpc-core" }
+gpc-policy = { path = "../gpc-policy" }
+gpc-world = { path = "../gpc-world" }
+gpc-eval = { path = "../gpc-eval" }
+gpc-train = { path = "../gpc-train" }
+gpc-compat = { path = "../gpc-compat" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
