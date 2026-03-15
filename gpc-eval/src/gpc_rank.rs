@@ -88,12 +88,10 @@ where
         device: &B::Device,
     ) -> Result<Tensor<B, 3>> {
         let k = self.num_candidates;
-        let [_batch_size, _, _] = obs_history.dims();
-        let [_, state_dim] = current_state.dims();
 
         // 1. Sample K candidate action sequences
         let candidates = self.policy.sample_k(obs_history, k, device)?;
-        let [total_k, horizon, action_dim] = candidates.dims();
+        let [_, horizon, action_dim] = candidates.dims();
 
         // 2. Repeat current state K times
         let states_repeated = gpc_core::tensor_utils::repeat_batch_2d(current_state, k);
@@ -110,9 +108,6 @@ where
 
         // 6. Extract the best action sequence
         let best_actions = candidates.slice([best_idx..best_idx + 1, 0..horizon, 0..action_dim]);
-
-        let _ = total_k;
-        let _ = state_dim;
 
         Ok(best_actions)
     }

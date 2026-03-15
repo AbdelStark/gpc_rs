@@ -184,7 +184,6 @@ impl<B: Backend> Policy<B> for DiffusionPolicy<B> {
         device: &B::Device,
     ) -> gpc_core::Result<Tensor<B, 3>> {
         let schedule = DdpmSchedule::new(&gpc_core::config::NoiseScheduleConfig::default());
-
         // Repeat observations K times along batch dimension
         let obs_repeated = tensor_utils::repeat_batch(obs_history, num_candidates);
         let obs_cond = tensor_utils::flatten_last_two(obs_repeated);

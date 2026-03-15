@@ -129,6 +129,25 @@ mod tests {
     }
 
     #[test]
+    fn test_mse_loss_known_value() {
+        let device = <TestBackend as Backend>::Device::default();
+        let a = Tensor::<TestBackend, 2>::from_floats([[1.0, 2.0]], &device);
+        let b = Tensor::<TestBackend, 2>::from_floats([[3.0, 4.0]], &device);
+        let loss = mse_loss(&a, &b);
+        // MSE = mean((1-3)^2, (2-4)^2) = mean(4, 4) = 4.0
+        let val = loss.into_scalar();
+        assert!((val - 4.0).abs() < 1e-5, "Expected MSE = 4.0, got {val}");
+    }
+
+    #[test]
+    fn test_repeat_batch_2d() {
+        let device = <TestBackend as Backend>::Device::default();
+        let tensor = Tensor::<TestBackend, 2>::ones([2, 4], &device);
+        let repeated = repeat_batch_2d(&tensor, 3);
+        assert_eq!(repeated.dims(), [6, 4]);
+    }
+
+    #[test]
     fn test_timestep_embedding_different_timesteps_produce_different_embeddings() {
         let device = <TestBackend as Backend>::Device::default();
         let t1 = Tensor::<TestBackend, 1>::from_floats([0.0], &device);

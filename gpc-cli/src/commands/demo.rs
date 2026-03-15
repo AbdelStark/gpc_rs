@@ -148,7 +148,10 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
         .clone()
         .slice([0..1, 0..1, 0..action_dim])
         .reshape([action_dim]);
-    let action_data: Vec<f32> = first_action.into_data().to_vec().unwrap();
+    let action_data: Vec<f32> = first_action
+        .into_data()
+        .to_vec()
+        .map_err(|e| anyhow::anyhow!("failed to extract action data: {e:?}"))?;
     tracing::info!("First action: {:?}", action_data);
 
     tracing::info!("=== Demo Complete ===");
