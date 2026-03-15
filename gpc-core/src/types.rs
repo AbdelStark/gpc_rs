@@ -101,11 +101,14 @@ impl NormalizationStats {
     }
 
     /// Denormalize a value using stored statistics.
+    ///
+    /// Uses the same zero-std guard as [`normalize`](Self::normalize):
+    /// when std <= 1e-8 the value is treated as a pure offset (v + mean).
     pub fn denormalize(&self, values: &[f32]) -> Vec<f32> {
         values
             .iter()
             .zip(self.mean.iter().zip(self.std.iter()))
-            .map(|(v, (m, s))| v * s + m)
+            .map(|(v, (m, s))| if *s > 1e-8 { v * s + m } else { v + m })
             .collect()
     }
 }
@@ -138,5 +141,28 @@ mod tests {
         };
         let normalized = stats.normalize(&[5.0]);
         assert_relative_eq!(normalized[0], 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_denormalize_zero_std_roundtrip() {
+        let stats = NormalizationStats {
+            mean: vec![5.0],
+            std: vec![0.0],
+        };
+        let normalized = stats.normalize(&[5.0]);
+        let recovered = stats.denormalize(&normalized);
+        assert_relative_eq!(recovered[0], 5.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_normalization_empty_input() {
+        let stats = NormalizationStats {
+            mean: vec![],
+            std: vec![],
+        };
+        let normalized = stats.normalize(&[]);
+        assert!(normalized.is_empty());
+        let denormalized = stats.denormalize(&[]);
+        assert!(denormalized.is_empty());
     }
 }

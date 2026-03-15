@@ -68,7 +68,6 @@ pub trait WorldModel<B: Backend> {
     ) -> Result<Tensor<B, 3>> {
         let [batch_size, horizon, _action_dim] = actions.dims();
         let state_dim = initial_state.dims()[1];
-        let device = initial_state.device();
 
         let mut states = Vec::with_capacity(horizon);
         let mut current_state = initial_state.clone();
@@ -85,7 +84,6 @@ pub trait WorldModel<B: Backend> {
 
         let result = Tensor::cat(states, 1);
         debug_assert_eq!(result.dims(), [batch_size, horizon, state_dim]);
-        let _ = device;
         Ok(result)
     }
 }

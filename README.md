@@ -266,7 +266,9 @@ cargo test -p gpc-eval
 
 ## Project Status
 
-**Alpha** — suitable for research, experimentation, and extension.
+> As of 2026-03-15, this project is **alpha**. It is suitable for research, experimentation,
+> and extension. It is not yet suitable for production robotics deployments. Breaking changes
+> may occur in any release.
 
 ### What works
 
@@ -279,6 +281,8 @@ cargo test -p gpc-eval
 - ONNX model inspection via Tract
 - Synthetic data generation for quick experimentation
 - Comprehensive test suite with NdArray backend
+- Config validation for all component configurations
+- Typed error handling with context throughout the stack
 
 ### Known limitations
 
@@ -286,6 +290,8 @@ cargo test -p gpc-eval
 - ONNX support covers inspection only — full graph execution is not yet production-ready
 - No pretrained model registry yet (planned)
 - Data loading is single-threaded
+- GPC-OPT uses finite-difference gradients (autodiff integration planned)
+- No real-world environment integration yet (gym/mujoco bindings)
 
 ## References
 

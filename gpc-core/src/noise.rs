@@ -29,9 +29,23 @@ pub struct DdpmSchedule {
     pub num_timesteps: usize,
 }
 
+impl Default for DdpmSchedule {
+    fn default() -> Self {
+        Self::new(&NoiseScheduleConfig::default())
+    }
+}
+
 impl DdpmSchedule {
     /// Create a new DDPM schedule from configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config.num_timesteps` is 0.
     pub fn new(config: &NoiseScheduleConfig) -> Self {
+        assert!(
+            config.num_timesteps > 0,
+            "DdpmSchedule requires at least 1 timestep"
+        );
         let n = config.num_timesteps;
         let mut betas = Vec::with_capacity(n);
         for i in 0..n {
@@ -171,6 +185,18 @@ mod tests {
             diff < 0.01,
             "At t=0 noise should be minimal, got diff={diff}"
         );
+    }
+
+    #[test]
+    fn test_single_timestep_schedule() {
+        let config = NoiseScheduleConfig {
+            num_timesteps: 1,
+            beta_start: 1e-4,
+            beta_end: 0.02,
+        };
+        let schedule = DdpmSchedule::new(&config);
+        assert_eq!(schedule.betas.len(), 1);
+        assert_eq!(schedule.alphas_cumprod.len(), 1);
     }
 
     #[test]

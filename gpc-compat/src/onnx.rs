@@ -81,8 +81,15 @@ impl OnnxInspector {
 
         let outputs: Vec<Vec<f32>> = result
             .iter()
-            .map(|t| t.as_slice::<f32>().map(|s| s.to_vec()).unwrap_or_default())
-            .collect();
+            .enumerate()
+            .map(|(i, t)| {
+                t.as_slice::<f32>().map(|s| s.to_vec()).map_err(|e| {
+                    gpc_core::GpcError::Model(format!(
+                        "failed to convert output tensor {i} to f32: {e}"
+                    ))
+                })
+            })
+            .collect::<gpc_core::Result<Vec<_>>>()?;
 
         Ok(outputs)
     }

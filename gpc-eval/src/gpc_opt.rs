@@ -122,7 +122,11 @@ where
                 .reshape([batch_size * horizon * action_dim])
                 .into_data()
                 .to_vec()
-                .unwrap();
+                .map_err(|e| {
+                    gpc_core::GpcError::Evaluation(format!(
+                        "failed to extract action tensor data: {e:?}"
+                    ))
+                })?;
             let mut grad_data = vec![0.0_f32; actions_data.len()];
 
             for i in 0..actions_data.len() {
@@ -130,9 +134,8 @@ where
                 perturbed[i] += epsilon;
 
                 let device = actions.device();
-                let perturbed_tensor =
-                    Tensor::<B, 1>::from_floats(perturbed.as_slice(), &device)
-                        .reshape([batch_size, horizon, action_dim]);
+                let perturbed_tensor = Tensor::<B, 1>::from_floats(perturbed.as_slice(), &device)
+                    .reshape([batch_size, horizon, action_dim]);
 
                 let perturbed_states =
                     self.world_model.rollout(current_state, &perturbed_tensor)?;
