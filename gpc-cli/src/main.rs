@@ -1,16 +1,25 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod commands;
+
 /// Generative Robot Policies — Rust implementation.
+///
+/// GPC: inference-time method for improving pretrained behavior-cloning
+/// policies via predictive world modeling.
 #[derive(Parser, Debug)]
-#[command(name = "gpc", version, about)]
+#[command(name = "gpc", version, about, long_about = None)]
 enum Cli {
     /// Train the diffusion policy or world model.
-    Train,
+    Train(commands::TrainArgs),
     /// Evaluate trajectories using GPC-RANK or GPC-OPT.
-    Eval,
+    Eval(commands::EvalArgs),
     /// Inspect or convert model checkpoints.
-    Checkpoint,
+    Checkpoint(commands::CheckpointArgs),
+    /// Generate a default configuration file.
+    InitConfig(commands::InitConfigArgs),
+    /// Run a quick demo with synthetic data.
+    Demo(commands::DemoArgs),
 }
 
 fn main() -> Result<()> {
@@ -21,16 +30,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli {
-        Cli::Train => {
-            tracing::info!("Training not yet implemented");
-        }
-        Cli::Eval => {
-            tracing::info!("Evaluation not yet implemented");
-        }
-        Cli::Checkpoint => {
-            tracing::info!("Checkpoint inspection not yet implemented");
-        }
+        Cli::Train(args) => commands::run_train(args),
+        Cli::Eval(args) => commands::run_eval(args),
+        Cli::Checkpoint(args) => commands::run_checkpoint(args),
+        Cli::InitConfig(args) => commands::run_init_config(args),
+        Cli::Demo(args) => commands::run_demo(args),
     }
-
-    Ok(())
 }

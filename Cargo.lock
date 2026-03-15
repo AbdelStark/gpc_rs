@@ -2292,6 +2292,8 @@ name = "gpc-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "burn",
+ "burn-ndarray",
  "clap",
  "gpc-compat",
  "gpc-core",
@@ -2299,6 +2301,8 @@ dependencies = [
  "gpc-policy",
  "gpc-train",
  "gpc-world",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2372,7 +2376,9 @@ dependencies = [
  "gpc-core",
  "gpc-policy",
  "gpc-world",
+ "rand 0.8.5",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

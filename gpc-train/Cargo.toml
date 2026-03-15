@@ -12,8 +12,10 @@ gpc-policy = { path = "../gpc-policy" }
 gpc-world = { path = "../gpc-world" }
 burn = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 burn-ndarray = { workspace = true }

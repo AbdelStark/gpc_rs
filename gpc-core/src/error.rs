@@ -14,6 +14,28 @@ pub enum GpcError {
     #[error("Model error: {0}")]
     Model(String),
 
+    #[error("Training error: {0}")]
+    Training(String),
+
+    #[error("Evaluation error: {0}")]
+    Evaluation(String),
+
+    #[error("Configuration error: {0}")]
+    Config(String),
+
+    #[error("Checkpoint error: {0}")]
+    Checkpoint(String),
+
+    #[error("Data loading error: {0}")]
+    DataLoading(String),
+
+    #[error("Dimension mismatch: {context} — expected {expected}, got {got}")]
+    DimensionMismatch {
+        context: String,
+        expected: usize,
+        got: usize,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
