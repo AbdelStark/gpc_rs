@@ -2,6 +2,7 @@
 
 mod checkpoint;
 mod demo;
+mod demo_tui;
 mod eval;
 mod init_config;
 mod train;

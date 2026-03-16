@@ -1,5 +1,7 @@
 //! Demo command: end-to-end pipeline with synthetic data.
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use burn::backend::Autodiff;
 use burn::backend::ndarray::NdArray;
@@ -15,43 +17,72 @@ use gpc_train::{PolicyTrainer, WorldModelTrainer};
 use gpc_world::reward::L2RewardFunctionConfig;
 use gpc_world::world_model::StateWorldModelConfig;
 
+use super::demo_tui;
+
 type TrainBackend = Autodiff<NdArray>;
 type InferBackend = NdArray;
 
 /// Arguments for the demo command.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct DemoArgs {
-    /// Number of training epochs (keep small for demo).
+    /// Number of training epochs.
     #[arg(long, default_value = "5")]
-    epochs: usize,
+    pub epochs: usize,
+
+    /// Number of synthetic episodes to generate.
+    #[arg(long, default_value = "12")]
+    pub episodes: usize,
+
+    /// Number of timesteps per synthetic episode.
+    #[arg(long, default_value = "36")]
+    pub episode_length: usize,
 
     /// Number of GPC-RANK candidates.
-    #[arg(long, default_value = "10")]
-    num_candidates: usize,
+    #[arg(long, default_value = "12")]
+    pub num_candidates: usize,
 
     /// State/observation dimensionality.
     #[arg(long, default_value = "4")]
-    state_dim: usize,
+    pub state_dim: usize,
 
     /// Action dimensionality.
     #[arg(long, default_value = "2")]
-    action_dim: usize,
+    pub action_dim: usize,
+
+    /// Random seed for synthetic data generation.
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Disable the interactive TUI and print plain logs instead.
+    #[arg(long)]
+    pub plain: bool,
 }
 
 /// Run the end-to-end demo.
 pub fn run_demo(args: DemoArgs) -> Result<()> {
+    let args = normalize_args(args);
+
+    if args.plain || !std::io::stdout().is_terminal() {
+        return run_plain_demo(args);
+    }
+
+    demo_tui::run_showcase(args)
+}
+
+fn run_plain_demo(args: DemoArgs) -> Result<()> {
     tracing::info!("=== GPC End-to-End Demo ===");
     tracing::info!(
-        "Config: state_dim={}, action_dim={}, epochs={}, candidates={}",
+        "Config: state_dim={}, action_dim={}, epochs={}, candidates={}, episodes={}, episode_length={}",
         args.state_dim,
         args.action_dim,
         args.epochs,
-        args.num_candidates
+        args.num_candidates,
+        args.episodes,
+        args.episode_length
     );
 
     let device = <TrainBackend as Backend>::Device::default();
 
-    // 1. Generate synthetic dataset
     tracing::info!("Step 1: Generating synthetic dataset...");
     let dataset_config = GpcDatasetConfig {
         data_dir: "demo".to_string(),
@@ -61,18 +92,22 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
         obs_horizon: 2,
         pred_horizon: 4,
     };
-    let dataset = GpcDataset::generate_synthetic(dataset_config, 10, 30, 42);
+    let dataset = GpcDataset::generate_synthetic(
+        dataset_config,
+        args.episodes,
+        args.episode_length,
+        args.seed,
+    );
     tracing::info!(
         "  Generated {} episodes, {} transitions",
         dataset.num_episodes(),
         dataset.num_transitions()
     );
 
-    // 2. Train world model (Phase 1 only for demo)
     tracing::info!("Step 2: Training world model (Phase 1)...");
     let training_config = TrainingConfig {
         num_epochs: args.epochs,
-        batch_size: 32,
+        batch_size: 16,
         learning_rate: 1e-3,
         log_every: 1,
         ..Default::default()
@@ -87,7 +122,6 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
     let wm_trainer = WorldModelTrainer::new(training_config.clone(), world_model_config);
     let _world_model = wm_trainer.train_phase1::<TrainBackend>(&dataset, &device);
 
-    // 3. Train diffusion policy
     tracing::info!("Step 3: Training diffusion policy...");
     let policy_config = PolicyConfig {
         obs_dim: args.state_dim,
@@ -101,11 +135,9 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
     let policy_trainer = PolicyTrainer::new(training_config, policy_config);
     let _policy = policy_trainer.train::<TrainBackend>(&dataset, &device);
 
-    // 4. Convert to inference backend
     tracing::info!("Step 4: Running GPC-RANK evaluation...");
     let infer_device = <InferBackend as Backend>::Device::default();
 
-    // Create fresh inference models (in production, you'd load from checkpoint)
     let policy_config = DiffusionPolicyConfig {
         obs_dim: args.state_dim,
         action_dim: args.action_dim,
@@ -130,7 +162,6 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
     };
     let reward_fn = reward_config.init::<InferBackend>(&infer_device);
 
-    // 5. GPC-RANK evaluation
     let evaluator = GpcRankBuilder::new(infer_policy, infer_wm, reward_fn)
         .num_candidates(args.num_candidates)
         .build();
@@ -143,7 +174,6 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
 
     tracing::info!("Selected action sequence: [{horizon} steps, {action_dim} dims]");
 
-    // Print first action
     let first_action = best_action
         .clone()
         .slice([0..1, 0..1, 0..action_dim])
@@ -156,4 +186,14 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
 
     tracing::info!("=== Demo Complete ===");
     Ok(())
+}
+
+fn normalize_args(mut args: DemoArgs) -> DemoArgs {
+    args.epochs = args.epochs.max(1);
+    args.episodes = args.episodes.max(4);
+    args.episode_length = args.episode_length.max(8);
+    args.num_candidates = args.num_candidates.max(4);
+    args.state_dim = args.state_dim.max(2);
+    args.action_dim = args.action_dim.max(1);
+    args
 }
