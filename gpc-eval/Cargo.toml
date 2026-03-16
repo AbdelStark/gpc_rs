@@ -1,15 +1,19 @@
 [package]
-name = "gpc-eval"
+name = "world-models-gpc-eval"
 description = "Trajectory ranking and optimization evaluation for GPC"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "gpc_eval"
 
 [dependencies]
-gpc-core = { path = "../gpc-core" }
-gpc-policy = { path = "../gpc-policy" }
-gpc-world = { path = "../gpc-world" }
+gpc-core = { workspace = true }
+gpc-policy = { workspace = true }
+gpc-world = { workspace = true }
 burn = { workspace = true }
 ndarray = { workspace = true }
 serde = { workspace = true }

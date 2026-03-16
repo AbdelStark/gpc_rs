@@ -18,6 +18,14 @@ license = "MIT"
 repository = "https://github.com/AbdelStark/gpc_rs"
 
 [workspace.dependencies]
+# Internal crates
+gpc-core = { version = "0.1.0", path = "gpc-core", package = "world-models-gpc-core" }
+gpc-policy = { version = "0.1.0", path = "gpc-policy", package = "world-models-gpc-policy" }
+gpc-world = { version = "0.1.0", path = "gpc-world", package = "world-models-gpc-world" }
+gpc-eval = { version = "0.1.0", path = "gpc-eval", package = "world-models-gpc-eval" }
+gpc-train = { version = "0.1.0", path = "gpc-train", package = "world-models-gpc-train" }
+gpc-compat = { version = "0.1.0", path = "gpc-compat", package = "world-models-gpc-compat" }
+
 # ML frameworks
 burn = { version = "0.20.1", features = ["train", "ndarray", "wgpu"] }
 burn-ndarray = "0.20.1"

@@ -55,6 +55,20 @@ Not implemented yet:
 - non-demo evaluation that loads trained weights end to end
 - published task benchmarks or model zoo artifacts
 
+## Published Packages
+
+The crates are published to crates.io with a `world-models-` prefix:
+
+| Workspace crate | crates.io package |
+| --- | --- |
+| `gpc-core` | `world-models-gpc-core` |
+| `gpc-policy` | `world-models-gpc-policy` |
+| `gpc-world` | `world-models-gpc-world` |
+| `gpc-eval` | `world-models-gpc-eval` |
+| `gpc-train` | `world-models-gpc-train` |
+| `gpc-compat` | `world-models-gpc-compat` |
+| `gpc-cli` | `world-models-gpc-cli` |
+
 ## Pipeline
 
 The codebase follows the same high-level split as the paper:
@@ -90,19 +104,19 @@ cargo fmt --all -- --check
 Interactive TUI showcase:
 
 ```bash
-cargo run -p gpc-cli -- demo
+cargo run -p world-models-gpc-cli -- demo
 ```
 
 Plain terminal output:
 
 ```bash
-cargo run -p gpc-cli -- demo --plain
+cargo run -p world-models-gpc-cli -- demo --plain
 ```
 
 Smaller smoke-test run:
 
 ```bash
-cargo run -p gpc-cli -- demo --plain --epochs 1 --episodes 4 --episode-length 8 --num-candidates 4
+cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --episode-length 8 --num-candidates 4
 ```
 
 ## CLI
@@ -122,34 +136,34 @@ The `gpc` binary is the easiest way to exercise the workspace.
 Generate a default config:
 
 ```bash
-cargo run -p gpc-cli -- init-config --output gpc_config.json
+cargo run -p world-models-gpc-cli -- init-config --output gpc_config.json
 ```
 
 Train on synthetic data:
 
 ```bash
-cargo run -p gpc-cli -- train --synthetic --component all --epochs 20
+cargo run -p world-models-gpc-cli -- train --synthetic --component all --epochs 20
 ```
 
 Train from a dataset directory containing `episodes.json`:
 
 ```bash
-cargo run -p gpc-cli -- train --data data --component world-model --epochs 50 --horizon 8
+cargo run -p world-models-gpc-cli -- train --data data --component world-model --epochs 50 --horizon 8
 ```
 
 Run evaluator demos with randomly initialized models:
 
 ```bash
-cargo run -p gpc-cli -- eval --demo --strategy rank --num-candidates 64
-cargo run -p gpc-cli -- eval --demo --strategy opt --opt-steps 10
+cargo run -p world-models-gpc-cli -- eval --demo --strategy rank --num-candidates 64
+cargo run -p world-models-gpc-cli -- eval --demo --strategy opt --opt-steps 10
 ```
 
 Inspect artifacts:
 
 ```bash
-cargo run -p gpc-cli -- checkpoint --action inspect --path model.onnx
-cargo run -p gpc-cli -- checkpoint --action inspect --path checkpoints/model.bin
-cargo run -p gpc-cli -- checkpoint --action inspect --path checkpoints/model.meta.json
+cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path model.onnx
+cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path checkpoints/model.bin
+cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path checkpoints/model.meta.json
 ```
 
 ## Workspace Layout
@@ -240,7 +254,7 @@ The top-level config type is `gpc_core::config::GpcConfig`. It contains five sec
 Generate a valid config with:
 
 ```bash
-cargo run -p gpc-cli -- init-config --output gpc_config.json
+cargo run -p world-models-gpc-cli -- init-config --output gpc_config.json
 ```
 
 All config structs are `serde`-serializable and expose validation methods in [gpc-core/src/config.rs](gpc-core/src/config.rs).

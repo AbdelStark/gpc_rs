@@ -1,13 +1,17 @@
 [package]
-name = "gpc-compat"
+name = "world-models-gpc-compat"
 description = "Model interoperability and checkpoint loading for GPC"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "gpc_compat"
 
 [dependencies]
-gpc-core = { path = "../gpc-core" }
+gpc-core = { workspace = true }
 burn = { workspace = true }
 tract-onnx = { workspace = true }
 tract-core = { workspace = true }

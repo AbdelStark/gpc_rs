@@ -1,22 +1,23 @@
 [package]
-name = "gpc-cli"
+name = "world-models-gpc-cli"
 description = "CLI interface for GPC operations"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "gpc"
 path = "src/main.rs"
 
 [dependencies]
-gpc-core = { path = "../gpc-core" }
-gpc-policy = { path = "../gpc-policy" }
-gpc-world = { path = "../gpc-world" }
-gpc-eval = { path = "../gpc-eval" }
-gpc-train = { path = "../gpc-train" }
-gpc-compat = { path = "../gpc-compat" }
+gpc-core = { workspace = true }
+gpc-policy = { workspace = true }
+gpc-world = { workspace = true }
+gpc-eval = { workspace = true }
+gpc-train = { workspace = true }
+gpc-compat = { workspace = true }
 burn = { workspace = true }
 burn-ndarray = { workspace = true }
 clap = { workspace = true }

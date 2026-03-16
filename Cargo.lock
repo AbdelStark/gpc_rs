@@ -2902,118 +2902,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpc-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "burn",
- "burn-ndarray",
- "clap",
- "crossterm",
- "gpc-compat",
- "gpc-core",
- "gpc-eval",
- "gpc-policy",
- "gpc-train",
- "gpc-world",
- "rand 0.8.5",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gpc-compat"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "burn",
- "burn-ndarray",
- "gpc-core",
- "serde",
- "serde_json",
- "tracing",
- "tract-core",
- "tract-onnx",
-]
-
-[[package]]
-name = "gpc-core"
-version = "0.1.0"
-dependencies = [
- "approx",
- "burn",
- "burn-ndarray",
- "ndarray 0.16.1",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "gpc-eval"
-version = "0.1.0"
-dependencies = [
- "approx",
- "burn",
- "burn-ndarray",
- "gpc-core",
- "gpc-policy",
- "gpc-world",
- "ndarray 0.16.1",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "gpc-policy"
-version = "0.1.0"
-dependencies = [
- "approx",
- "burn",
- "burn-ndarray",
- "gpc-core",
- "ndarray 0.16.1",
- "rand 0.8.5",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "gpc-train"
-version = "0.1.0"
-dependencies = [
- "burn",
- "burn-ndarray",
- "gpc-core",
- "gpc-policy",
- "gpc-world",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gpc-world"
-version = "0.1.0"
-dependencies = [
- "approx",
- "burn",
- "burn-ndarray",
- "gpc-core",
- "ndarray 0.16.1",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "gpu-alloc"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7505,6 +7393,118 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "world-models-gpc-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "burn-ndarray",
+ "clap",
+ "crossterm",
+ "rand 0.8.5",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "world-models-gpc-compat",
+ "world-models-gpc-core",
+ "world-models-gpc-eval",
+ "world-models-gpc-policy",
+ "world-models-gpc-train",
+ "world-models-gpc-world",
+]
+
+[[package]]
+name = "world-models-gpc-compat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "burn-ndarray",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tract-core",
+ "tract-onnx",
+ "world-models-gpc-core",
+]
+
+[[package]]
+name = "world-models-gpc-core"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "burn",
+ "burn-ndarray",
+ "ndarray 0.16.1",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "world-models-gpc-eval"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "burn",
+ "burn-ndarray",
+ "ndarray 0.16.1",
+ "serde",
+ "tracing",
+ "world-models-gpc-core",
+ "world-models-gpc-policy",
+ "world-models-gpc-world",
+]
+
+[[package]]
+name = "world-models-gpc-policy"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "burn",
+ "burn-ndarray",
+ "ndarray 0.16.1",
+ "rand 0.8.5",
+ "serde",
+ "tracing",
+ "world-models-gpc-core",
+]
+
+[[package]]
+name = "world-models-gpc-train"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-ndarray",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "world-models-gpc-core",
+ "world-models-gpc-policy",
+ "world-models-gpc-world",
+]
+
+[[package]]
+name = "world-models-gpc-world"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "burn",
+ "burn-ndarray",
+ "ndarray 0.16.1",
+ "serde",
+ "tracing",
+ "world-models-gpc-core",
 ]
 
 [[package]]

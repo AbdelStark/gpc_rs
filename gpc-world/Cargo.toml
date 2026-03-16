@@ -1,13 +1,17 @@
 [package]
-name = "gpc-world"
+name = "world-models-gpc-world"
 description = "Predictive world model for GPC"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "gpc_world"
 
 [dependencies]
-gpc-core = { path = "../gpc-core" }
+gpc-core = { workspace = true }
 burn = { workspace = true }
 ndarray = { workspace = true }
 serde = { workspace = true }
