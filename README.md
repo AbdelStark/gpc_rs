@@ -29,6 +29,8 @@ The demo TUI exposes the core stages of the pipeline: dataset generation, world-
 
 This repository is a clean systems-oriented implementation of the ideas in *Generative Robot Policies via Predictive World Modeling*. It is useful today for:
 
+The official implementation of the paper is available at [han20192019/gpc_code](https://github.com/han20192019/gpc_code). Use that repository as the primary reference for the original training stack and paper-aligned behavior.
+
 - experimenting with the GPC decomposition in Rust
 - training on synthetic data
 - exercising the crate APIs from Rust code
