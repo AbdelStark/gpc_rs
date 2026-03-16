@@ -1,323 +1,278 @@
+# gpc-rs
+
+[![CI](https://img.shields.io/github/actions/workflow/status/AbdelStark/gpc_rs/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/AbdelStark/gpc_rs/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-93450a.svg?style=flat-square)](rust-toolchain.toml)
+[![Paper](https://img.shields.io/badge/arXiv-2502.00622-b31b1b.svg?style=flat-square)](https://arxiv.org/pdf/2502.00622)
+
+`gpc-rs` is a Rust workspace for building and evaluating Generative Robot Policies with predictive world modeling.
+
+The repository implements the core pieces of the GPC pipeline:
+
+- a diffusion-based action policy
+- a state-based world model
+- inference-time evaluators for sampling, ranking, and optimization
+- training loops, synthetic data generation, and a CLI
+
+It is built on [Burn](https://burn.dev) for model code and [Tract](https://github.com/sonos/tract) for ONNX inspection/runtime utilities.
+
+## Showcase
+
 <p align="center">
-  <h1 align="center">gpc-rs</h1>
-  <p align="center">
-    <strong>Generative Robot Policies via Predictive World Modeling — in Rust</strong>
-  </p>
-  <p align="center">
-    <a href="https://github.com/AbdelStark/gpc_rs/actions"><img src="https://img.shields.io/github/actions/workflow/status/AbdelStark/gpc_rs/ci.yml?branch=main&style=flat-square&logo=github&label=CI" alt="CI"></a>
-    <a href="https://github.com/AbdelStark/gpc_rs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
-    <a href="https://arxiv.org/pdf/2502.00622"><img src="https://img.shields.io/badge/arXiv-2502.00622-b31b1b.svg?style=flat-square" alt="arXiv"></a>
-  </p>
+  <img src="docs/assets/img/gpc-rs-screenshot-tui-1.png" alt="gpc-rs interactive demo showing pipeline progress, metrics, and ranking telemetry" width="48%" />
+  <img src="docs/assets/img/gpc-rs-screenshot-tui-2.png" alt="gpc-rs interactive demo showing training curves, candidate ranking, and rollout summaries" width="48%" />
 </p>
 
----
+The demo TUI exposes the core stages of the pipeline: dataset generation, world-model warmup, diffusion-policy training, candidate rollout, ranking, and selected-action inspection.
 
-Rust implementation of **GPC** (Generative Predictive Coding for robotic policies) from the paper [*Generative Robot Policies via Predictive World Modeling*](https://arxiv.org/pdf/2502.00622). Built on [Burn](https://burn.dev) for training and [Tract](https://github.com/sonos/tract) for ONNX inference.
+## Scope
 
-**gpc-rs** provides a modular, backend-agnostic framework for training diffusion-based action policies, learning predictive world models, and combining them at inference time via trajectory ranking (GPC-RANK) or gradient-based optimization (GPC-OPT).
+This repository is a clean systems-oriented implementation of the ideas in *Generative Robot Policies via Predictive World Modeling*. It is useful today for:
 
-```
-                          ┌────────────────────┐
-                          │   Demonstrations    │
-                          └────────┬───────────┘
-                                   │
-                    ┌──────────────┴──────────────┐
-                    ▼                              ▼
-          ┌──────────────────┐          ┌──────────────────┐
-          │  Diffusion Policy │          │   World Model    │
-          │  (gpc-policy)     │          │   (gpc-world)    │
-          │                   │          │                   │
-          │  DDPM denoising   │          │  Phase 1: 1-step  │
-          │  Obs → Actions    │          │  Phase 2: N-step  │
-          └────────┬─────────┘          └────────┬─────────┘
-                   │                              │
-                   │    ┌────────────────────┐    │
-                   └───►│    GPC Evaluation   │◄──┘
-                        │    (gpc-eval)       │
-                        │                     │
-                        │  GPC-RANK: sample K │
-                        │   trajectories,     │
-                        │   pick the best     │
-                        │                     │
-                        │  GPC-OPT: refine    │
-                        │   via gradients     │
-                        └─────────┬───────────┘
-                                  │
-                                  ▼
-                          ┌───────────────┐
-                          │  Best Action  │
-                          └───────────────┘
-```
+- experimenting with the GPC decomposition in Rust
+- training on synthetic data
+- exercising the crate APIs from Rust code
+- inspecting ONNX models and checkpoint metadata
+- running a full end-to-end demo through the CLI
 
-## Why Rust?
+It is not yet a full benchmarked reproduction of the reference training stack. If you are looking for pretrained models, published benchmark numbers, or a finished real-dataset evaluation pipeline, those are not here yet.
 
-| | gpc-rs (Rust) | Reference impl (Python) |
-|---|---|---|
-| **Runtime** | Native binary, no Python/CUDA dependency | Requires Python + PyTorch + CUDA |
-| **Memory** | Rust ownership model, zero GC pauses | Python GC + PyTorch allocator |
-| **Backend** | Any Burn backend (CPU, GPU, WebGPU, WASM) | CUDA-centric |
-| **Type safety** | Compile-time tensor shape checks | Runtime shape errors |
-| **Deployment** | Single static binary | Docker + Python environment |
-| **Inference** | Tract ONNX runtime, no framework overhead | Full PyTorch runtime |
+## What Is Implemented
+
+Implemented now:
+
+- `gpc-policy`: diffusion policy with DDPM-style denoising
+- `gpc-world`: state world model with single-step and rollout training support
+- `gpc-eval`: `GpcRank` and `GpcOpt`
+- `gpc-train`: dataset utilities, synthetic data generation, batchers, and trainers
+- `gpc-compat`: checkpoint metadata I/O and ONNX inspection/runtime helpers
+- `gpc-cli`: training, evaluation demo, checkpoint inspection, config generation, and an interactive TUI showcase
+
+Not implemented yet:
+
+- CLI checkpoint conversion
+- automatic checkpoint persistence from the training command
+- non-demo evaluation that loads trained weights end to end
+- published task benchmarks or model zoo artifacts
+
+## Pipeline
+
+The codebase follows the same high-level split as the paper:
+
+1. Train a diffusion policy on demonstrations.
+2. Train a world model to predict future states from actions.
+3. At inference time, sample candidate action sequences from the policy.
+4. Roll each candidate through the world model.
+5. Score the resulting trajectories with a reward function.
+6. Either pick the best candidate (`GPC-RANK`) or refine actions with finite-difference optimization (`GPC-OPT`).
 
 ## Quick Start
 
-### Build & Run
+### Requirements
+
+- Rust `1.85+`
+- `cargo`
+- `rustfmt` and `clippy` if you want to run the full quality gates
+
+The workspace is pinned to stable Rust in [rust-toolchain.toml](rust-toolchain.toml).
+
+### Build and Verify
 
 ```bash
-# Build the entire workspace
 cargo build --workspace
-
-# Run all tests
 cargo test --workspace
-
-# Generate a default config file
-cargo run -p gpc-cli -- init-config
-
-# Run the end-to-end demo with synthetic data
-cargo run -p gpc-cli -- demo --epochs 10 --num-candidates 8
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-### CLI
+### Run the Demo
 
-The `gpc` binary provides a unified CLI for training, evaluation, and model management:
+Interactive TUI showcase:
 
 ```bash
-# Train the diffusion policy on demonstration data
-cargo run -p gpc-cli -- train --data demos.json --component policy --epochs 100
-
-# Train the world model (both phases)
-cargo run -p gpc-cli -- train --data demos.json --component world-model --epochs 50
-
-# Train everything together
-cargo run -p gpc-cli -- train --data demos.json --component all --epochs 100
-
-# Train with synthetic data (no dataset required)
-cargo run -p gpc-cli -- train --synthetic --epochs 20 --horizon 16
-
-# Evaluate using GPC-RANK (sample & rank trajectories)
-cargo run -p gpc-cli -- eval --strategy rank --num-candidates 64
-
-# Evaluate using GPC-OPT (gradient-based refinement)
-cargo run -p gpc-cli -- eval --strategy opt --opt-steps 10
-
-# Run eval demo with random models
-cargo run -p gpc-cli -- eval --demo
-
-# Inspect a checkpoint
-cargo run -p gpc-cli -- checkpoint --action inspect --path model.bin
-
-# Inspect an ONNX model
-cargo run -p gpc-cli -- checkpoint --action inspect --path model.onnx
+cargo run -p gpc-cli -- demo
 ```
 
-### Using gpc-rs as a Library
+Plain terminal output:
+
+```bash
+cargo run -p gpc-cli -- demo --plain
+```
+
+Smaller smoke-test run:
+
+```bash
+cargo run -p gpc-cli -- demo --plain --epochs 1 --episodes 4 --episode-length 8 --num-candidates 4
+```
+
+## CLI
+
+The `gpc` binary is the easiest way to exercise the workspace.
+
+| Command | Purpose | Notes |
+| --- | --- | --- |
+| `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
+| `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
+| `eval` | Run evaluator demos | The runnable path today is `--demo` |
+| `checkpoint` | Inspect `.onnx`, `.bin`, and `.meta.json` files | `convert` is not implemented yet |
+| `init-config` | Write a default JSON config file | Prints the generated config to stdout |
+
+### CLI Examples
+
+Generate a default config:
+
+```bash
+cargo run -p gpc-cli -- init-config --output gpc_config.json
+```
+
+Train on synthetic data:
+
+```bash
+cargo run -p gpc-cli -- train --synthetic --component all --epochs 20
+```
+
+Train from a dataset directory containing `episodes.json`:
+
+```bash
+cargo run -p gpc-cli -- train --data data --component world-model --epochs 50 --horizon 8
+```
+
+Run evaluator demos with randomly initialized models:
+
+```bash
+cargo run -p gpc-cli -- eval --demo --strategy rank --num-candidates 64
+cargo run -p gpc-cli -- eval --demo --strategy opt --opt-steps 10
+```
+
+Inspect artifacts:
+
+```bash
+cargo run -p gpc-cli -- checkpoint --action inspect --path model.onnx
+cargo run -p gpc-cli -- checkpoint --action inspect --path checkpoints/model.bin
+cargo run -p gpc-cli -- checkpoint --action inspect --path checkpoints/model.meta.json
+```
+
+## Workspace Layout
+
+| Crate | Responsibility |
+| --- | --- |
+| `gpc-core` | Shared config types, error handling, core traits, tensor utilities, and diffusion schedules |
+| `gpc-policy` | Diffusion policy and denoising network |
+| `gpc-world` | State dynamics model and reward functions |
+| `gpc-eval` | `GpcRank` and `GpcOpt` evaluators |
+| `gpc-train` | Dataset handling and training orchestration |
+| `gpc-compat` | Checkpoint helpers and ONNX inspection/runtime |
+| `gpc-cli` | Command-line entrypoint and showcase demo |
+
+The workspace root pins shared dependencies, toolchain, and quality gates:
+
+- Burn `0.20.1`
+- stable Rust `1.85`
+- CI for `check`, `test`, `clippy -D warnings`, and `fmt --check`
+
+## Minimal Library Example
+
+This example wires together randomly initialized components and runs `GpcRank`. It is a good starting point for understanding the public API shape.
 
 ```rust
+use burn::backend::NdArray;
 use burn::prelude::*;
-use burn_ndarray::{NdArray, NdArrayDevice};
-use gpc_core::config::{PolicyConfig, WorldModelConfig, GpcRankConfig};
-use gpc_core::traits::{Policy, WorldModel, Evaluator};
-use gpc_core::types::{Observation, State};
-use gpc_policy::DiffusionPolicy;
-use gpc_world::StateWorldModel;
-use gpc_eval::GpcRank;
+use gpc_core::traits::Evaluator;
+use gpc_eval::GpcRankBuilder;
+use gpc_policy::DiffusionPolicyConfig;
+use gpc_world::reward::L2RewardFunctionConfig;
+use gpc_world::world_model::StateWorldModelConfig;
 
-type B = NdArray<f32>;
+type B = NdArray;
 
-fn main() {
-    let device = NdArrayDevice::Cpu;
+fn main() -> gpc_core::Result<()> {
+    let device = <B as Backend>::Device::default();
 
-    // Configure and build a diffusion policy
-    let policy_config = PolicyConfig {
-        action_dim: 4,
-        obs_dim: 8,
-        horizon: 16,
-        hidden_dim: 256,
-        num_diffusion_steps: 50,
-        num_residual_blocks: 4,
+    let policy = DiffusionPolicyConfig {
+        obs_dim: 20,
+        action_dim: 2,
+        obs_horizon: 2,
+        pred_horizon: 16,
+        hidden_dim: 128,
         time_embed_dim: 64,
-    };
-    let policy = DiffusionPolicy::<B>::new(&policy_config, &device);
+        num_res_blocks: 2,
+    }
+    .init::<B>(&device);
 
-    // Configure and build a world model
-    let world_config = WorldModelConfig {
-        state_dim: 8,
-        action_dim: 4,
-        hidden_dim: 256,
-        num_residual_blocks: 4,
-    };
-    let world_model = StateWorldModel::<B>::new(&world_config, &device);
+    let world_model = StateWorldModelConfig {
+        state_dim: 20,
+        action_dim: 2,
+        hidden_dim: 128,
+        num_layers: 2,
+    }
+    .init::<B>(&device);
 
-    // At inference: generate candidates, score via world model, pick the best
-    let obs = Observation::new(Tensor::zeros([1, 8], &device));
-    let state = State::new(Tensor::zeros([1, 8], &device));
+    let reward = L2RewardFunctionConfig { state_dim: 20 }
+        .init::<B>(&device)
+        .with_goal(Tensor::<B, 1>::zeros([20], &device));
 
-    // Sample K candidate action sequences from the policy
-    let candidates = policy.sample_k(&obs, 64, &device);
+    let evaluator = GpcRankBuilder::new(policy, world_model, reward)
+        .num_candidates(32)
+        .build();
 
-    // Score each candidate via world model rollout
-    // GPC-RANK selects the highest-scoring trajectory
+    let obs = Tensor::<B, 3>::zeros([1, 2, 20], &device);
+    let state = Tensor::<B, 2>::zeros([1, 20], &device);
+
+    let action = evaluator.select_action(&obs, &state, &device)?;
+    assert_eq!(action.dims(), [1, 16, 2]);
+
+    Ok(())
 }
 ```
 
-## Architecture
+For actual training loops, use `gpc-train` directly or the `gpc train` CLI command.
 
-```
-gpc-rs/
-├── gpc-core          Core traits, error types, shared abstractions
-│   ├── Policy           Trait: generative action policy (sample, sample_k)
-│   ├── WorldModel       Trait: predictive dynamics (predict, rollout)
-│   ├── RewardFunction   Trait: trajectory scoring
-│   ├── Evaluator        Trait: action selection strategy
-│   ├── GpcError         Typed error hierarchy (thiserror)
-│   ├── DdpmSchedule     DDPM noise scheduling with precomputed alphas
-│   └── tensor_utils     Flatten, unflatten, MSE, sinusoidal embeddings
-│
-├── gpc-policy        Diffusion-based action policy (DDPM)
-│   ├── DiffusionPolicy  Iterative denoising: noise → action sequence
-│   ├── DenoisingNetwork Conditional MLP with time + obs conditioning
-│   └── ResidualBlock    Residual block with time & conditioning projections
-│
-├── gpc-world         Predictive world model
-│   ├── StateWorldModel  Residual dynamics: next = state + f(state, action)
-│   ├── DynamicsNetwork  MLP-based state transition predictor
-│   ├── L2RewardFunction Negative L2 distance to goal state
-│   └── LearnedReward    Neural network reward predictor
-│
-├── gpc-eval          Inference-time evaluation strategies
-│   ├── GpcRank          Sample K → score each → select best trajectory
-│   └── GpcOpt           Finite-difference gradient optimization of actions
-│
-├── gpc-train         Training orchestration and data loading
-│   ├── PolicyTrainer    DDPM training loop (noise, perturb, predict, MSE)
-│   ├── WorldModelTrainer Two-phase training (single-step → multi-step)
-│   └── GpcDataset       Episode data, batchers, synthetic generation
-│
-├── gpc-compat        Checkpoint loading, ONNX, PyTorch interop
-│   ├── Checkpoint       Save/load weights + metadata (binary + JSON)
-│   └── OnnxInspector    Tract-based ONNX model inspection
-│
-└── gpc-cli           CLI binary with 5 subcommands
-    ├── train            Train policy, world model, or both
-    ├── eval             GPC-RANK or GPC-OPT evaluation
-    ├── checkpoint       Inspect/convert model checkpoints
-    ├── init-config      Generate default configuration
-    └── demo             End-to-end pipeline with synthetic data
-```
+## Configuration
 
-All model code is generic over `B: burn::tensor::backend::Backend`, enabling transparent execution on CPU (NdArray), GPU (WGPU), or WebAssembly backends.
+The top-level config type is `gpc_core::config::GpcConfig`. It contains five sections:
 
-## The GPC Framework
+- `policy`
+- `world_model`
+- `training`
+- `gpc_rank`
+- `gpc_opt`
 
-GPC separates robot policy learning into two independently trained components that combine at inference time:
-
-### 1. Diffusion Policy (gpc-policy)
-
-A DDPM-based generative model that produces candidate action sequences from observations. Given the current observation, it iteratively denoises Gaussian noise into plausible action trajectories through learned reverse diffusion steps.
-
-- Trained independently on demonstration data
-- At inference, generates K candidate trajectories in parallel
-- Architecture: conditional MLP with residual blocks, timestep embeddings, and observation conditioning
-
-### 2. World Model (gpc-world)
-
-A predictive dynamics model that forecasts future states given a current state and action sequence. Uses residual prediction (`next_state = state + Δ`) for stable multi-step rollouts.
-
-- **Phase 1**: Single-step prediction warmup — learn to predict one step ahead
-- **Phase 2**: Multi-step rollout training — jointly supervise entire trajectories
-
-### 3. Evaluation Strategies (gpc-eval)
-
-At inference time, the policy and world model combine through one of two strategies:
-
-**GPC-RANK** — Sample and rank:
-1. Sample K candidate action sequences from the diffusion policy
-2. Roll out each candidate through the world model
-3. Score each predicted trajectory using a reward function
-4. Select the highest-scoring trajectory
-
-**GPC-OPT** — Gradient-based refinement:
-1. Warm-start from a policy sample
-2. Compute reward gradients via finite differences
-3. Iteratively update actions: `a ← a + η · ∇ₐ R(W(s, a))`
-4. Return the optimized trajectory
-
-## Build & Test
+Generate a valid config with:
 
 ```bash
-# Full workspace build
-cargo build --workspace
-
-# Run all tests
-cargo test --workspace
-
-# Lint with zero-warning policy
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Format check
-cargo fmt --all -- --check
-
-# Test a single crate
-cargo test -p gpc-core
-cargo test -p gpc-policy
-cargo test -p gpc-eval
+cargo run -p gpc-cli -- init-config --output gpc_config.json
 ```
 
-## Project Status
+All config structs are `serde`-serializable and expose validation methods in [gpc-core/src/config.rs](gpc-core/src/config.rs).
 
-> As of 2026-03-15, this project is **alpha**. It is suitable for research, experimentation,
-> and extension. It is not yet suitable for production robotics deployments. Breaking changes
-> may occur in any release.
+## Development
 
-### What works
+CI runs the same commands you should use locally:
 
-- Complete diffusion policy with DDPM sampling and training
-- State-based world model with two-phase training (single-step + multi-step rollout)
-- GPC-RANK trajectory ranking with configurable candidate count
-- GPC-OPT finite-difference gradient optimization
-- CLI with training, evaluation, checkpoint inspection, and demo commands
-- Checkpoint save/load with metadata (binary weights + JSON metadata)
-- ONNX model inspection via Tract
-- Synthetic data generation for quick experimentation
-- Comprehensive test suite with NdArray backend
-- Config validation for all component configurations
-- Typed error handling with context throughout the stack
+```bash
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
 
-### Known limitations
+The workflow definition lives in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-- Training loops use NdArray backend only (WGPU backend support is structural but untested for training)
-- ONNX support covers inspection only — full graph execution is not yet production-ready
-- No pretrained model registry yet (planned)
-- Data loading is single-threaded
-- GPC-OPT uses finite-difference gradients (autodiff integration planned)
-- No real-world environment integration yet (gym/mujoco bindings)
+## Limitations
+
+Current limitations worth knowing before you build on this:
+
+- The `eval` command is mainly a demo surface today. It does not yet load trained checkpoints and run a full deployment path.
+- The `checkpoint convert` command is stubbed out.
+- The training command creates an output directory but does not currently persist trained model weights.
+- The repository has solid unit coverage and CI, but it does not yet ship benchmark scripts or task-level regression suites.
 
 ## References
 
-| Resource | Link |
-|----------|------|
-| **Paper** | [Generative Robot Policies via Predictive World Modeling](https://arxiv.org/pdf/2502.00622) |
-| **Reference implementation** (Python) | [han20192019/gpc_code](https://github.com/han20192019/gpc_code) |
-| **Sister project** (JEPA in Rust) | [AbdelStark/jepa-rs](https://github.com/AbdelStark/jepa-rs) |
-| **Burn** (ML framework) | [burn.dev](https://burn.dev) |
-| **Tract** (ONNX runtime) | [sonos/tract](https://github.com/sonos/tract) |
-
-## Contributing
-
-Contributions are welcome! Please ensure your changes:
-
-1. Pass all checks: `cargo clippy --workspace --all-targets -- -D warnings`
-2. Pass all tests: `cargo test --workspace`
-3. Are formatted: `cargo fmt --all`
-4. Follow the commit convention: `type(scope): description` (e.g., `feat(policy): add noise schedule warmup`)
+- Paper: [*Generative Robot Policies via Predictive World Modeling*](https://arxiv.org/pdf/2502.00622)
+- Burn: <https://burn.dev>
+- Tract: <https://github.com/sonos/tract>
 
 ## License
 
-MIT License. See [LICENSE](./LICENSE) for details.
-
----
-
-<p align="center">
-  <sub>Built with <a href="https://burn.dev">Burn</a> and <a href="https://github.com/sonos/tract">Tract</a></sub>
-</p>
+MIT. See [LICENSE](LICENSE).
