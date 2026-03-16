@@ -231,10 +231,14 @@ pub struct WorldModelBatch<B: Backend> {
     pub next_states: Tensor<B, 2>,
 }
 
-impl<B: Backend> Batcher<(Vec<f32>, Vec<f32>, Vec<f32>), WorldModelBatch<B>>
+impl<B: Backend> Batcher<B, (Vec<f32>, Vec<f32>, Vec<f32>), WorldModelBatch<B>>
     for WorldModelBatcher<B>
 {
-    fn batch(&self, items: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)>) -> WorldModelBatch<B> {
+    fn batch(
+        &self,
+        items: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)>,
+        _device: &B::Device,
+    ) -> WorldModelBatch<B> {
         let batch_size = items.len();
         let state_dim = items[0].0.len();
         let action_dim = items[0].1.len();
@@ -300,8 +304,12 @@ pub struct PolicyBatch<B: Backend> {
     pub actions: Tensor<B, 3>,
 }
 
-impl<B: Backend> Batcher<(Vec<Vec<f32>>, Vec<Vec<f32>>), PolicyBatch<B>> for PolicyBatcher<B> {
-    fn batch(&self, items: Vec<(Vec<Vec<f32>>, Vec<Vec<f32>>)>) -> PolicyBatch<B> {
+impl<B: Backend> Batcher<B, (Vec<Vec<f32>>, Vec<Vec<f32>>), PolicyBatch<B>> for PolicyBatcher<B> {
+    fn batch(
+        &self,
+        items: Vec<(Vec<Vec<f32>>, Vec<Vec<f32>>)>,
+        _device: &B::Device,
+    ) -> PolicyBatch<B> {
         let batch_size = items.len();
 
         let obs_flat: Vec<f32> = items

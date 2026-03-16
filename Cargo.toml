@@ -19,9 +19,9 @@ repository = "https://github.com/AbdelStark/gpc_rs"
 
 [workspace.dependencies]
 # ML frameworks
-burn = { version = "0.16", features = ["train", "ndarray", "wgpu"] }
-burn-ndarray = "0.16"
-burn-wgpu = "0.16"
+burn = { version = "0.20.1", features = ["train", "ndarray", "wgpu"] }
+burn-ndarray = "0.20.1"
+burn-wgpu = "0.20.1"
 tract-onnx = "0.21"
 tract-core = "0.21"
 

@@ -63,7 +63,7 @@ impl<B: Backend> RewardFunction<B> for L2RewardFunction<B> {
 
         // Negative L2 distance (higher = closer to goal)
         let diff = final_state - goal;
-        let sq_dist = (diff.clone() * diff).sum_dim(1).squeeze(1);
+        let sq_dist = (diff.clone() * diff).sum_dim(1).squeeze_dim(1);
         let reward = sq_dist.sqrt().neg(); // -sqrt(sum((s - g)^2))
 
         Ok(reward)

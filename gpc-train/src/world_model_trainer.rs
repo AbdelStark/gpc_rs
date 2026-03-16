@@ -58,8 +58,11 @@ impl WorldModelTrainer {
 
             // Simple batching
             for chunk in samples.chunks(batch_size) {
-                let batch: WorldModelBatch<B> =
-                    burn::data::dataloader::batcher::Batcher::batch(&batcher, chunk.to_vec());
+                let batch: WorldModelBatch<B> = burn::data::dataloader::batcher::Batcher::batch(
+                    &batcher,
+                    chunk.to_vec(),
+                    device,
+                );
 
                 // Forward pass
                 let predicted_delta = model.predict_delta(&batch.states, &batch.actions);

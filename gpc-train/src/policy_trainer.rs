@@ -66,8 +66,11 @@ impl PolicyTrainer {
             let mut num_batches = 0;
 
             for chunk in samples.chunks(batch_size) {
-                let batch: PolicyBatch<B> =
-                    burn::data::dataloader::batcher::Batcher::batch(&batcher, chunk.to_vec());
+                let batch: PolicyBatch<B> = burn::data::dataloader::batcher::Batcher::batch(
+                    &batcher,
+                    chunk.to_vec(),
+                    device,
+                );
 
                 let [bs, pred_h, act_dim] = batch.actions.dims();
 
