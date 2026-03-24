@@ -1245,6 +1245,9 @@ fn train_policy(
         hidden_dim: 48,
         time_embed_dim: 32,
         num_res_blocks: 2,
+        diffusion_steps: 24,
+        beta_start: 1e-4,
+        beta_end: 0.02,
     };
     let mut model = config.init::<TrainBackend>(device);
     let schedule = DdpmSchedule::new(&gpc_core::config::NoiseScheduleConfig::default());

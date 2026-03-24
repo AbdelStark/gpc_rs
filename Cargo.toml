@@ -7,6 +7,8 @@ members = [
     "gpc-train",
     "gpc-compat",
     "gpc-cli",
+    "gpc-wasm",
+    "gpc-demo-server",
 ]
 resolver = "2"
 
@@ -27,7 +29,7 @@ gpc-train = { version = "0.1.0", path = "gpc-train", package = "world-models-gpc
 gpc-compat = { version = "0.1.0", path = "gpc-compat", package = "world-models-gpc-compat" }
 
 # ML frameworks
-burn = { version = "0.20.1", features = ["train", "ndarray", "wgpu"] }
+burn = { version = "0.20.1", default-features = false, features = ["std", "ndarray", "autodiff"] }
 burn-ndarray = "0.20.1"
 burn-wgpu = "0.20.1"
 tract-onnx = "0.21"

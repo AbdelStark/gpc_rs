@@ -146,6 +146,9 @@ fn run_plain_demo(args: DemoArgs) -> Result<()> {
         hidden_dim: 32,
         time_embed_dim: 16,
         num_res_blocks: 1,
+        diffusion_steps: 24,
+        beta_start: 1e-4,
+        beta_end: 0.02,
     };
     let infer_policy = policy_config.init::<InferBackend>(&infer_device);
 

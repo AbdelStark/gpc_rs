@@ -3,6 +3,7 @@
 use burn::prelude::*;
 use burn::tensor::Distribution;
 
+use gpc_core::config::NoiseScheduleConfig;
 use gpc_core::config::PolicyConfig;
 use gpc_core::noise::DdpmSchedule;
 use gpc_core::tensor_utils;
@@ -33,6 +34,15 @@ pub struct DiffusionPolicy<B: Backend> {
     /// Action dimensionality.
     #[module(skip)]
     action_dim: usize,
+    /// Number of diffusion denoising steps.
+    #[module(skip)]
+    diffusion_steps: usize,
+    /// Start beta for the linear diffusion schedule.
+    #[module(skip)]
+    beta_start: f64,
+    /// End beta for the linear diffusion schedule.
+    #[module(skip)]
+    beta_end: f64,
 }
 
 /// Configuration for the diffusion policy.
@@ -57,6 +67,15 @@ pub struct DiffusionPolicyConfig {
     /// Number of residual blocks.
     #[config(default = 3)]
     pub num_res_blocks: usize,
+    /// Number of diffusion denoising steps.
+    #[config(default = 100)]
+    pub diffusion_steps: usize,
+    /// Start beta for the linear diffusion schedule.
+    #[config(default = 1e-4)]
+    pub beta_start: f64,
+    /// End beta for the linear diffusion schedule.
+    #[config(default = 0.02)]
+    pub beta_end: f64,
 }
 
 impl DiffusionPolicyConfig {
@@ -70,6 +89,9 @@ impl DiffusionPolicyConfig {
             hidden_dim: config.hidden_dim,
             time_embed_dim: 128,
             num_res_blocks: config.num_res_blocks,
+            diffusion_steps: config.noise_schedule.num_timesteps,
+            beta_start: config.noise_schedule.beta_start,
+            beta_end: config.noise_schedule.beta_end,
         }
     }
 
@@ -85,7 +107,6 @@ impl DiffusionPolicyConfig {
             time_embed_dim: self.time_embed_dim,
             num_blocks: self.num_res_blocks,
         };
-
         DiffusionPolicy {
             network: network_config.init(device),
             flat_action_dim,
@@ -93,6 +114,9 @@ impl DiffusionPolicyConfig {
             time_embed_dim: self.time_embed_dim,
             pred_horizon: self.pred_horizon,
             action_dim: self.action_dim,
+            diffusion_steps: self.diffusion_steps,
+            beta_start: self.beta_start,
+            beta_end: self.beta_end,
         }
     }
 }
@@ -172,7 +196,11 @@ impl<B: Backend> Policy<B> for DiffusionPolicy<B> {
         obs_history: &Tensor<B, 3>,
         device: &B::Device,
     ) -> gpc_core::Result<Tensor<B, 3>> {
-        let schedule = DdpmSchedule::new(&gpc_core::config::NoiseScheduleConfig::default());
+        let schedule = DdpmSchedule::new(&NoiseScheduleConfig {
+            num_timesteps: self.diffusion_steps,
+            beta_start: self.beta_start,
+            beta_end: self.beta_end,
+        });
         let obs_cond = tensor_utils::flatten_last_two(obs_history.clone());
         Ok(self.ddpm_sample(obs_cond, &schedule, device))
     }
@@ -183,7 +211,11 @@ impl<B: Backend> Policy<B> for DiffusionPolicy<B> {
         num_candidates: usize,
         device: &B::Device,
     ) -> gpc_core::Result<Tensor<B, 3>> {
-        let schedule = DdpmSchedule::new(&gpc_core::config::NoiseScheduleConfig::default());
+        let schedule = DdpmSchedule::new(&NoiseScheduleConfig {
+            num_timesteps: self.diffusion_steps,
+            beta_start: self.beta_start,
+            beta_end: self.beta_end,
+        });
         // Repeat observations K times along batch dimension
         let obs_repeated = tensor_utils::repeat_batch(obs_history, num_candidates);
         let obs_cond = tensor_utils::flatten_last_two(obs_repeated);
@@ -212,6 +244,9 @@ mod tests {
             hidden_dim: 32,
             time_embed_dim: 16,
             num_res_blocks: 1,
+            diffusion_steps: 12,
+            beta_start: 1e-4,
+            beta_end: 0.02,
         };
 
         let policy = config.init::<TestBackend>(&device);
@@ -233,6 +268,9 @@ mod tests {
             hidden_dim: 32,
             time_embed_dim: 16,
             num_res_blocks: 1,
+            diffusion_steps: 12,
+            beta_start: 1e-4,
+            beta_end: 0.02,
         };
 
         let policy = config.init::<TestBackend>(&device);
@@ -254,6 +292,9 @@ mod tests {
             hidden_dim: 32,
             time_embed_dim: 16,
             num_res_blocks: 1,
+            diffusion_steps: 12,
+            beta_start: 1e-4,
+            beta_end: 0.02,
         };
 
         let policy = config.init::<TestBackend>(&device);

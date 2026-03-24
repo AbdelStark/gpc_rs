@@ -72,6 +72,9 @@ fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
         hidden_dim: 32,
         time_embed_dim: 16,
         num_res_blocks: 1,
+        diffusion_steps: 24,
+        beta_start: 1e-4,
+        beta_end: 0.02,
     };
     let policy = policy_config.init::<EvalBackend>(&device);
 

@@ -18,7 +18,7 @@ gpc-world = { workspace = true }
 gpc-eval = { workspace = true }
 gpc-train = { workspace = true }
 gpc-compat = { workspace = true }
-burn = { workspace = true }
+burn = { workspace = true, features = ["dataset"] }
 burn-ndarray = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
