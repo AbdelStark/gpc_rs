@@ -105,9 +105,8 @@ impl DdpmSchedule {
         noise: &Tensor<B, D>,
         t: usize,
     ) -> Tensor<B, D> {
-        let t = self.clamp_timestep(t);
-        let sqrt_alpha = self.sqrt_alphas_cumprod[t] as f32;
-        let sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t] as f32;
+        let sqrt_alpha = self.sqrt_alpha(t);
+        let sqrt_one_minus_alpha = self.sqrt_one_minus_alpha(t);
 
         x_0.clone() * sqrt_alpha + noise.clone() * sqrt_one_minus_alpha
     }
@@ -153,16 +152,21 @@ impl DdpmSchedule {
         x_0.clone() * sqrt_alpha + noise.clone() * sqrt_one_minus_alpha
     }
 
-    fn clamp_timestep(&self, t: usize) -> usize {
-        t.min(self.num_timesteps.saturating_sub(1))
+    fn validate_timestep(&self, t: usize) -> usize {
+        assert!(
+            t < self.num_timesteps,
+            "timestep {t} out of range for schedule of length {}",
+            self.num_timesteps
+        );
+        t
     }
 
     fn sqrt_alpha(&self, t: usize) -> f32 {
-        self.sqrt_alphas_cumprod[self.clamp_timestep(t)] as f32
+        self.sqrt_alphas_cumprod[self.validate_timestep(t)] as f32
     }
 
     fn sqrt_one_minus_alpha(&self, t: usize) -> f32 {
-        self.sqrt_one_minus_alphas_cumprod[self.clamp_timestep(t)] as f32
+        self.sqrt_one_minus_alphas_cumprod[self.validate_timestep(t)] as f32
     }
 
     /// Reverse diffusion step: denoise x_t to x_{t-1}.
