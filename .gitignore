@@ -9,5 +9,4 @@
 .env.*
 web-demo/node_modules
 web-demo/dist
-web-demo/src/wasm/pkg
 gpc-wasm/src/wasm/pkg
