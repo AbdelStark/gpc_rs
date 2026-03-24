@@ -166,7 +166,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | --- | --- | --- |
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
 | `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
-| `eval` | Run evaluator demos | The runnable path today is `--demo` |
+| `eval` | Evaluate saved policy/world-model checkpoints | Supports synthetic or JSON datasets; `--demo` still runs random-model smoke tests |
 | `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
 | `init-config` | Write a default JSON config file | Prints the generated config to stdout |
 
@@ -185,7 +185,14 @@ cargo run -p world-models-gpc-cli -- train --data data --component world-model -
 # Save checkpoints to a custom directory
 cargo run -p world-models-gpc-cli -- train --synthetic --component all --output runs/exp-001
 
-# Run evaluator demos
+# Run checkpoint-backed evaluation on reproducible synthetic data
+cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --strategy rank --synthetic --episodes 8 --episode-length 24 --seed 42 --num-candidates 64
+cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --strategy opt --synthetic --episodes 8 --episode-length 24 --seed 42 --opt-steps 10 --opt-learning-rate 0.01
+
+# Evaluate checkpoints against a dataset directory or episodes.json
+cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --data data --strategy rank --num-candidates 64
+
+# Run evaluator demos with random models
 cargo run -p world-models-gpc-cli -- eval --demo --strategy rank --num-candidates 64
 cargo run -p world-models-gpc-cli -- eval --demo --strategy opt --opt-steps 10
 
@@ -289,7 +296,7 @@ CI workflow: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Limitations
 
-- The `eval` CLI command is mainly a demo surface. It does not yet load trained checkpoints for full deployment.
+- Checkpoint-backed `eval` reports rollout and action reconstruction metrics against held-out windows; it is not yet a task-specific benchmark harness.
 - `checkpoint convert` only covers Burn `.bin` and `.mpk` checkpoints for policy and world-model modules.
 - No benchmark scripts or task-level regression suites.
 
