@@ -2,6 +2,8 @@
 
 Interactive browser-based visualization of the GPC (Generative Policy Control) pipeline. A 2-link robot arm navigates around obstacles using a diffusion policy, a learned world model, and closed-loop replanning.
 
+The frontend now prefers a browser-side planner runtime backed by `gpc-wasm` and a Web Worker. If the worker or WASM bootstrap is unavailable, it falls back to the existing Rust REST server automatically.
+
 ## Architecture
 
 ```
@@ -19,7 +21,9 @@ The server trains a diffusion policy and world model from synthetic expert demon
 - `GET /api/snapshot` — runtime overview, training loss curves, mission presets
 - `POST /api/simulate` — runs closed-loop replanning for a mission, returns all planning frames
 
-The frontend polls for server readiness, fetches the snapshot, then triggers simulations. Vite proxies `/api` requests to the server.
+When the app falls back to the native server, it polls for readiness, fetches the snapshot, then triggers simulations. Vite proxies `/api` requests to the server.
+
+When the browser runtime is available, the app skips the server poll entirely and boots the planner in-process. The status badge in the header shows whether the current session is using `browser / wasm` or `server / rest`.
 
 ## Running
 

@@ -5,12 +5,13 @@ import {
   useEffect,
   useEffectEvent,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 
-import { fetchSimulation, fetchSnapshot, healthCheck } from './api'
 import { RobotStage } from './components/RobotStage'
 import { SignalChart } from './components/SignalChart'
+import { createPlannerSession, formatPlannerSource, type PlannerClient } from './plannerClient'
 import type {
   MissionPlayback,
   MissionSpec,
@@ -24,68 +25,94 @@ function App() {
   const [playback, setPlayback] = useState<MissionPlayback | null>(null)
   const [statusMessage, setStatusMessage] = useState('Connecting to planner…')
   const [error, setError] = useState<string | null>(null)
+  const [runtimeSource, setRuntimeSource] = useState<PlannerClient['source'] | null>(null)
   const [missionId, setMissionId] = useState('')
   const [mode, setMode] = useState<PlannerMode>('rank')
   const [candidateCount, setCandidateCount] = useState(18)
   const [frameIndex, setFrameIndex] = useState(0)
   const [autoplay, setAutoplay] = useState(true)
   const [simulating, setSimulating] = useState(false)
+  const plannerRef = useRef<PlannerClient | null>(null)
 
   const deferredCandidates = useDeferredValue(candidateCount)
 
   useEffect(() => {
     let cancelled = false
+    let activeClient: PlannerClient | null = null
 
     async function boot() {
-      while (!cancelled) {
-        if (await healthCheck()) break
-        await new Promise((resolve) => setTimeout(resolve, 800))
-      }
-      if (cancelled) return
-
-      setStatusMessage('Fetching engine snapshot…')
-
       try {
-        const snap = await fetchSnapshot()
-        if (cancelled) return
-        setSnapshot(snap)
-        setCandidateCount(snap.overview.recommended_candidates)
-        setMissionId((id) => id || snap.missions[0]?.id || '')
-        setStatusMessage('')
+        setError(null)
+        setStatusMessage('Connecting to planner…')
+
+        const session = await createPlannerSession((status) => {
+          if (cancelled) return
+          setRuntimeSource(status.source)
+          setStatusMessage(status.message)
+        })
+
+        if (cancelled) {
+          session.client.close()
+          return
+        }
+        activeClient = session.client
+        plannerRef.current = session.client
+        setRuntimeSource(session.client.source)
+        setSnapshot(session.snapshot)
+        setCandidateCount(session.snapshot.overview.recommended_candidates)
+        setMissionId((id) => id || session.snapshot.missions[0]?.id || '')
+        setStatusMessage(`${formatPlannerSource(session.client.source)} ready.`)
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to fetch snapshot')
+          setError(err instanceof Error ? err.message : 'Failed to initialize planner')
         }
       }
     }
 
     boot()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      activeClient?.close()
+      if (plannerRef.current === activeClient) {
+        plannerRef.current = null
+      }
+    }
   }, [])
 
   useEffect(() => {
     if (!snapshot || !missionId) return
 
     let cancelled = false
-    setSimulating(true)
+    const client = plannerRef.current
+    if (!client) {
+      return
+    }
 
-    fetchSimulation(missionId, mode, deferredCandidates)
-      .then((result) => {
+    async function runSimulation(currentClient: PlannerClient) {
+      setSimulating(true)
+      setError(null)
+      setStatusMessage(`Planning with ${formatPlannerSource(currentClient.source)}…`)
+
+      try {
+        const result = await currentClient.simulate(missionId, mode, deferredCandidates)
         if (cancelled) return
+
         startTransition(() => {
           setPlayback(result)
           setFrameIndex(0)
-          setStatusMessage('')
+          setStatusMessage(`${formatPlannerSource(currentClient.source)} planner ready.`)
         })
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Simulation failed')
+          setStatusMessage(`Planning failed with ${formatPlannerSource(currentClient.source)}.`)
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setSimulating(false)
-      })
+      }
+    }
+
+    void runSimulation(client)
 
     return () => { cancelled = true }
   }, [snapshot, missionId, mode, deferredCandidates])
@@ -120,6 +147,7 @@ function App() {
         <div className="top-bar__brand">
           <h1>GPC</h1>
           <span>Generative Policy Control</span>
+          <strong className="top-bar__source mono">{formatPlannerSource(runtimeSource)}</strong>
         </div>
         {snapshot ? (
           <div className="top-bar__stats">

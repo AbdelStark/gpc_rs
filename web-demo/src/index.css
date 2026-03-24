@@ -106,6 +106,7 @@ button { cursor: pointer; }
   display: flex;
   align-items: baseline;
   gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .top-bar__brand h1 {
@@ -119,6 +120,18 @@ button { cursor: pointer; }
 .top-bar__brand span {
   color: var(--t3);
   font-size: 0.78rem;
+}
+
+.top-bar__source {
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in oklab, var(--s2) 72%, var(--s3));
+  color: var(--t2);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .top-bar__stats {
