@@ -4,10 +4,17 @@ use anyhow::Result;
 use burn::backend::Autodiff;
 use burn::backend::ndarray::NdArray;
 use clap::Args;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpc_core::config::{GpcConfig, PolicyConfig, TrainingConfig, WorldModelConfig};
 use gpc_train::data::{GpcDataset, GpcDatasetConfig};
-use gpc_train::{PolicyTrainer, WorldModelTrainer};
+use gpc_train::{PolicyTrainer, PolicyTrainingResult, WorldModelTrainer, WorldModelTrainingResult};
+
+use gpc_compat::{
+    CheckpointArtifact, CheckpointFormat, CheckpointKind, CheckpointMetadata,
+    load_world_model_checkpoint, save_policy_checkpoint, save_world_model_checkpoint,
+};
 
 type TrainBackend = Autodiff<NdArray>;
 
@@ -88,33 +95,44 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
 
     std::fs::create_dir_all(&args.output)?;
 
-    match args.component.as_str() {
-        "world-model" | "wm" => {
-            train_world_model(
-                &training_config,
-                &config.world_model,
-                &dataset,
-                &device,
-                &args,
-            )?;
-        }
-        "policy" => {
-            train_policy(&training_config, &config.policy, &dataset, &device)?;
-        }
+    let artifacts = match args.component.as_str() {
+        "world-model" | "wm" => train_world_model(
+            &training_config,
+            &config.world_model,
+            &dataset,
+            &device,
+            &args,
+        )?,
+        "policy" => train_policy(
+            &training_config,
+            &config.policy,
+            &dataset,
+            &device,
+            &args.output,
+        )?,
         "all" => {
-            train_world_model(
+            let mut artifacts = train_world_model(
                 &training_config,
                 &config.world_model,
                 &dataset,
                 &device,
                 &args,
             )?;
-            train_policy(&training_config, &config.policy, &dataset, &device)?;
+            artifacts.extend(train_policy(
+                &training_config,
+                &config.policy,
+                &dataset,
+                &device,
+                &args.output,
+            )?);
+            artifacts
         }
         other => {
             anyhow::bail!("Unknown component: {other}. Use 'policy', 'world-model', or 'all'.");
         }
-    }
+    };
+
+    log_artifacts(&artifacts);
 
     tracing::info!("Training complete!");
     Ok(())
@@ -126,17 +144,37 @@ fn train_world_model(
     dataset: &GpcDataset,
     device: &<TrainBackend as burn::prelude::Backend>::Device,
     args: &TrainArgs,
-) -> Result<()> {
+) -> Result<Vec<CheckpointArtifact>> {
     let trainer = WorldModelTrainer::new(training_config.clone(), world_model_config.clone());
 
     tracing::info!("=== Phase 1: Single-step world model training ===");
-    let model = trainer.train_phase1::<TrainBackend>(dataset, device);
+    let phase1_result = trainer.train_phase1_with_summary::<TrainBackend>(dataset, device);
+    let phase1_artifact = save_world_model_stage(
+        phase1_result,
+        world_model_config,
+        "world_model_phase1",
+        &args.output,
+    )?;
+
+    let phase1_model =
+        load_world_model_checkpoint::<TrainBackend>(&phase1_artifact.checkpoint_path, device)?;
 
     tracing::info!("=== Phase 2: Multi-step world model training ===");
-    let _model = trainer.train_phase2::<TrainBackend>(dataset, model, args.horizon, device);
+    let phase2_result = trainer.train_phase2_with_summary::<TrainBackend>(
+        dataset,
+        phase1_model,
+        args.horizon,
+        device,
+    );
+    let phase2_artifact = save_world_model_stage(
+        phase2_result,
+        world_model_config,
+        "world_model_final",
+        &args.output,
+    )?;
 
     tracing::info!("World model training complete");
-    Ok(())
+    Ok(vec![phase1_artifact, phase2_artifact])
 }
 
 fn train_policy(
@@ -144,12 +182,99 @@ fn train_policy(
     policy_config: &PolicyConfig,
     dataset: &GpcDataset,
     device: &<TrainBackend as burn::prelude::Backend>::Device,
-) -> Result<()> {
+    output_dir: &str,
+) -> Result<Vec<CheckpointArtifact>> {
     let trainer = PolicyTrainer::new(training_config.clone(), policy_config.clone());
 
     tracing::info!("=== Diffusion policy training ===");
-    let _model = trainer.train::<TrainBackend>(dataset, device);
+    let result = trainer.train_with_summary::<TrainBackend>(dataset, device);
+    let artifact = save_policy_stage(result, policy_config, "policy_final", output_dir)?;
 
     tracing::info!("Policy training complete");
-    Ok(())
+    Ok(vec![artifact])
+}
+
+fn save_policy_stage(
+    result: PolicyTrainingResult<TrainBackend>,
+    policy_config: &PolicyConfig,
+    name: &str,
+    output_dir: &str,
+) -> Result<CheckpointArtifact> {
+    let metadata = checkpoint_metadata(
+        CheckpointKind::Policy,
+        result.final_epoch,
+        result.final_loss,
+        serde_json::to_string_pretty(policy_config)?,
+    );
+    let checkpoint = save_policy_checkpoint::<TrainBackend>(
+        result.model,
+        &metadata,
+        Path::new(output_dir).join(name),
+        CheckpointFormat::Bin,
+    )?;
+    tracing::info!(
+        "Saved policy checkpoint at {}",
+        checkpoint.checkpoint_path.display()
+    );
+    Ok(checkpoint)
+}
+
+fn save_world_model_stage(
+    result: WorldModelTrainingResult<TrainBackend>,
+    world_model_config: &WorldModelConfig,
+    name: &str,
+    output_dir: &str,
+) -> Result<CheckpointArtifact> {
+    let metadata = checkpoint_metadata(
+        CheckpointKind::WorldModel,
+        result.final_epoch,
+        result.final_loss,
+        serde_json::to_string_pretty(world_model_config)?,
+    );
+    let checkpoint = save_world_model_checkpoint::<TrainBackend>(
+        result.model,
+        &metadata,
+        Path::new(output_dir).join(name),
+        CheckpointFormat::Bin,
+    )?;
+    tracing::info!(
+        "Saved world-model checkpoint at {}",
+        checkpoint.checkpoint_path.display()
+    );
+    Ok(checkpoint)
+}
+
+fn checkpoint_metadata(
+    model_type: CheckpointKind,
+    epoch: Option<usize>,
+    loss: Option<f32>,
+    config_json: String,
+) -> CheckpointMetadata {
+    CheckpointMetadata {
+        model_type: model_type.as_str().to_string(),
+        epoch: epoch.unwrap_or_default(),
+        loss: loss.map(f64::from).unwrap_or_default(),
+        timestamp: current_timestamp(),
+        config_json,
+    }
+}
+
+fn current_timestamp() -> String {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => format!("{}Z", duration.as_secs()),
+        Err(_) => "0Z".to_string(),
+    }
+}
+
+fn log_artifacts(artifacts: &[CheckpointArtifact]) {
+    if artifacts.is_empty() {
+        tracing::warn!("No checkpoint artifacts were written");
+        return;
+    }
+
+    tracing::info!("Artifacts written:");
+    for artifact in artifacts {
+        tracing::info!("  - {}", artifact.checkpoint_path.display());
+        tracing::info!("    metadata: {}", artifact.metadata_path.display());
+    }
 }

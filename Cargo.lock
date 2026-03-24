@@ -6227,10 +6227,13 @@ dependencies = [
  "burn-ndarray",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tract-core",
  "tract-onnx",
  "world-models-gpc-core",
+ "world-models-gpc-policy",
+ "world-models-gpc-world",
 ]
 
 [[package]]

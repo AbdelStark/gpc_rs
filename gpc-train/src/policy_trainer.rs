@@ -10,6 +10,16 @@ use gpc_core::tensor_utils;
 
 use crate::data::{GpcDataset, PolicyBatch, PolicyBatcher};
 
+/// Result of a completed policy training run.
+pub struct PolicyTrainingResult<B: burn::tensor::backend::Backend> {
+    /// Trained diffusion policy model.
+    pub model: gpc_policy::DiffusionPolicy<B>,
+    /// Final epoch that ran, if any.
+    pub final_epoch: Option<usize>,
+    /// Final averaged loss for the last epoch, if any.
+    pub final_loss: Option<f32>,
+}
+
 /// Diffusion policy trainer.
 pub struct PolicyTrainer {
     training_config: TrainingConfig,
@@ -27,18 +37,31 @@ impl PolicyTrainer {
 
     /// Train the diffusion policy.
     ///
-    /// Uses DDPM training: sample noise, add to actions, predict noise, minimize MSE.
+    /// Returns only the trained model for backwards compatibility.
     pub fn train<B: burn::tensor::backend::AutodiffBackend>(
         &self,
         dataset: &GpcDataset,
         device: &B::Device,
     ) -> gpc_policy::DiffusionPolicy<B> {
+        self.train_with_summary::<B>(dataset, device).model
+    }
+
+    /// Train the diffusion policy and return a summary of the final epoch.
+    ///
+    /// Uses DDPM training: sample noise, add to actions, predict noise, minimize MSE.
+    pub fn train_with_summary<B: burn::tensor::backend::AutodiffBackend>(
+        &self,
+        dataset: &GpcDataset,
+        device: &B::Device,
+    ) -> PolicyTrainingResult<B> {
         use gpc_policy::DiffusionPolicyConfig;
 
         tracing::info!("Starting diffusion policy training");
 
         let policy_config = DiffusionPolicyConfig::from_policy_config(&self.policy_config);
         let mut model = policy_config.init::<B>(device);
+        let mut final_epoch = None;
+        let mut final_loss = None;
 
         let schedule = DdpmSchedule::new(&self.policy_config.noise_schedule);
 
@@ -49,7 +72,11 @@ impl PolicyTrainer {
         let samples = dataset.policy_samples();
         if samples.is_empty() {
             tracing::warn!("No policy training samples available");
-            return model;
+            return PolicyTrainingResult {
+                model,
+                final_epoch,
+                final_loss,
+            };
         }
 
         let batcher = PolicyBatcher::<B>::new(
@@ -116,8 +143,11 @@ impl PolicyTrainer {
                 num_batches += 1;
             }
 
+            let avg_loss = epoch_loss / num_batches as f32;
+            final_epoch = Some(epoch + 1);
+            final_loss = Some(avg_loss);
+
             if epoch % self.training_config.log_every == 0 {
-                let avg_loss = epoch_loss / num_batches as f32;
                 tracing::info!(
                     "Policy | Epoch {}/{} | Loss: {:.6}",
                     epoch + 1,
@@ -128,7 +158,11 @@ impl PolicyTrainer {
         }
 
         tracing::info!("Policy training complete");
-        model
+        PolicyTrainingResult {
+            model,
+            final_epoch,
+            final_loss,
+        }
     }
 }
 
@@ -175,6 +209,8 @@ mod tests {
         };
 
         let trainer = PolicyTrainer::new(training_config, policy_config);
-        let _model = trainer.train::<TestBackend>(&dataset, &device);
+        let result = trainer.train_with_summary::<TestBackend>(&dataset, &device);
+        assert_eq!(result.final_epoch, Some(2));
+        assert!(result.final_loss.is_some());
     }
 }

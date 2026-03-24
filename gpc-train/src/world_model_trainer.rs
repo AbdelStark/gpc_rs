@@ -8,6 +8,16 @@ use gpc_core::tensor_utils;
 
 use crate::data::{GpcDataset, WorldModelBatch, WorldModelBatcher};
 
+/// Result of a completed world model training run.
+pub struct WorldModelTrainingResult<B: burn::tensor::backend::Backend> {
+    /// Trained world model.
+    pub model: gpc_world::StateWorldModel<B>,
+    /// Final epoch that ran, if any.
+    pub final_epoch: Option<usize>,
+    /// Final averaged loss for the last epoch, if any.
+    pub final_loss: Option<f32>,
+}
+
 /// World model trainer handling both training phases.
 pub struct WorldModelTrainer {
     training_config: TrainingConfig,
@@ -31,6 +41,17 @@ impl WorldModelTrainer {
         dataset: &GpcDataset,
         device: &B::Device,
     ) -> gpc_world::StateWorldModel<B> {
+        self.train_phase1_with_summary::<B>(dataset, device).model
+    }
+
+    /// Train Phase 1: Single-step prediction warmup and return final metadata.
+    ///
+    /// Trains the world model to predict single-step state transitions.
+    pub fn train_phase1_with_summary<B: burn::tensor::backend::AutodiffBackend>(
+        &self,
+        dataset: &GpcDataset,
+        device: &B::Device,
+    ) -> WorldModelTrainingResult<B> {
         use gpc_world::world_model::StateWorldModelConfig;
 
         tracing::info!("Starting Phase 1 training: single-step prediction");
@@ -43,12 +64,23 @@ impl WorldModelTrainer {
         };
 
         let mut model = model_config.init::<B>(device);
+        let mut final_epoch = None;
+        let mut final_loss = None;
         let optimizer_config =
             AdamWConfig::new().with_weight_decay(self.training_config.weight_decay as f32);
 
         let mut optim = optimizer_config.init();
 
         let samples = dataset.world_model_samples();
+        if samples.is_empty() {
+            tracing::warn!("No world model training samples available for Phase 1");
+            return WorldModelTrainingResult {
+                model,
+                final_epoch,
+                final_loss,
+            };
+        }
+
         let batcher = WorldModelBatcher::<B>::new(device.clone());
         let batch_size = self.training_config.batch_size.min(samples.len());
 
@@ -81,8 +113,11 @@ impl WorldModelTrainer {
                 num_batches += 1;
             }
 
+            let avg_loss = epoch_loss / num_batches as f32;
+            final_epoch = Some(epoch + 1);
+            final_loss = Some(avg_loss);
+
             if epoch % self.training_config.log_every == 0 {
-                let avg_loss = epoch_loss / num_batches as f32;
                 tracing::info!(
                     "Phase 1 | Epoch {}/{} | Loss: {:.6}",
                     epoch + 1,
@@ -93,7 +128,11 @@ impl WorldModelTrainer {
         }
 
         tracing::info!("Phase 1 training complete");
-        model
+        WorldModelTrainingResult {
+            model,
+            final_epoch,
+            final_loss,
+        }
     }
 
     /// Train Phase 2: Multi-step rollout training.
@@ -103,15 +142,32 @@ impl WorldModelTrainer {
     pub fn train_phase2<B: burn::tensor::backend::AutodiffBackend>(
         &self,
         dataset: &GpcDataset,
-        mut model: gpc_world::StateWorldModel<B>,
+        model: gpc_world::StateWorldModel<B>,
         horizon: usize,
         device: &B::Device,
     ) -> gpc_world::StateWorldModel<B> {
+        self.train_phase2_with_summary::<B>(dataset, model, horizon, device)
+            .model
+    }
+
+    /// Train Phase 2: Multi-step rollout training and return final metadata.
+    ///
+    /// Fine-tunes the world model using multi-step trajectory prediction
+    /// with joint supervision at each timestep.
+    pub fn train_phase2_with_summary<B: burn::tensor::backend::AutodiffBackend>(
+        &self,
+        dataset: &GpcDataset,
+        mut model: gpc_world::StateWorldModel<B>,
+        horizon: usize,
+        device: &B::Device,
+    ) -> WorldModelTrainingResult<B> {
         tracing::info!(
             "Starting Phase 2 training: multi-step rollout (horizon={})",
             horizon
         );
 
+        let mut final_epoch = None;
+        let mut final_loss = None;
         let optimizer_config =
             AdamWConfig::new().with_weight_decay(self.training_config.weight_decay as f32);
         let mut optim = optimizer_config.init();
@@ -119,7 +175,11 @@ impl WorldModelTrainer {
         let sequences = dataset.world_model_sequences(horizon);
         if sequences.is_empty() {
             tracing::warn!("No sequences of sufficient length for Phase 2");
-            return model;
+            return WorldModelTrainingResult {
+                model,
+                final_epoch,
+                final_loss,
+            };
         }
 
         let batch_size = self.training_config.batch_size.min(sequences.len());
@@ -138,22 +198,26 @@ impl WorldModelTrainer {
                     .iter()
                     .flat_map(|(init, _, _)| init.iter().copied())
                     .collect();
-                let initial_states = Tensor::<B, 2>::from_floats(init_flat.as_slice(), device)
-                    .reshape([bs, state_dim]);
+                let initial_states =
+                    Tensor::<B, 2>::from_data(TensorData::new(init_flat, [bs, state_dim]), device);
 
                 let actions_flat: Vec<f32> = chunk
                     .iter()
                     .flat_map(|(_, acts, _)| acts.iter().flat_map(|a| a.iter().copied()))
                     .collect();
-                let actions = Tensor::<B, 3>::from_floats(actions_flat.as_slice(), device)
-                    .reshape([bs, horizon, action_dim]);
+                let actions = Tensor::<B, 3>::from_data(
+                    TensorData::new(actions_flat, [bs, horizon, action_dim]),
+                    device,
+                );
 
                 let targets_flat: Vec<f32> = chunk
                     .iter()
                     .flat_map(|(_, _, tgts)| tgts.iter().flat_map(|t| t.iter().copied()))
                     .collect();
-                let target_states = Tensor::<B, 3>::from_floats(targets_flat.as_slice(), device)
-                    .reshape([bs, horizon, state_dim]);
+                let target_states = Tensor::<B, 3>::from_data(
+                    TensorData::new(targets_flat, [bs, horizon, state_dim]),
+                    device,
+                );
 
                 // Multi-step rollout
                 let mut current_state = initial_states;
@@ -187,8 +251,11 @@ impl WorldModelTrainer {
                 num_batches += 1;
             }
 
+            let avg_loss = epoch_loss / num_batches as f32;
+            final_epoch = Some(epoch + 1);
+            final_loss = Some(avg_loss);
+
             if epoch % self.training_config.log_every == 0 {
-                let avg_loss = epoch_loss / num_batches as f32;
                 tracing::info!(
                     "Phase 2 | Epoch {}/{} | Loss: {:.6}",
                     epoch + 1,
@@ -199,7 +266,11 @@ impl WorldModelTrainer {
         }
 
         tracing::info!("Phase 2 training complete");
-        model
+        WorldModelTrainingResult {
+            model,
+            final_epoch,
+            final_loss,
+        }
     }
 }
 
@@ -244,6 +315,51 @@ mod tests {
         };
 
         let trainer = WorldModelTrainer::new(training_config, world_model_config);
-        let _model = trainer.train_phase1::<TestBackend>(&dataset, &device);
+        let result = trainer.train_phase1_with_summary::<TestBackend>(&dataset, &device);
+        assert_eq!(result.final_epoch, Some(2));
+        assert!(result.final_loss.is_some());
+    }
+
+    #[test]
+    fn test_phase2_trains_without_error() {
+        let device = <TestBackend as Backend>::Device::default();
+
+        let dataset_config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(dataset_config, 3, 20, 42);
+
+        let training_config = TrainingConfig {
+            num_epochs: 2,
+            batch_size: 16,
+            learning_rate: 1e-3,
+            log_every: 1,
+            ..Default::default()
+        };
+
+        let world_model_config = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            ..Default::default()
+        };
+
+        let trainer = WorldModelTrainer::new(training_config, world_model_config);
+        let phase1_result = trainer.train_phase1_with_summary::<TestBackend>(&dataset, &device);
+        let result = trainer.train_phase2_with_summary::<TestBackend>(
+            &dataset,
+            phase1_result.model,
+            2,
+            &device,
+        );
+        assert_eq!(result.final_epoch, Some(2));
+        assert!(result.final_loss.is_some());
     }
 }

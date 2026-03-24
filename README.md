@@ -167,7 +167,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
 | `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
 | `eval` | Run evaluator demos | The runnable path today is `--demo` |
-| `checkpoint` | Inspect `.onnx`, `.bin`, and `.meta.json` files | `convert` not yet implemented |
+| `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
 | `init-config` | Write a default JSON config file | Prints the generated config to stdout |
 
 ### CLI Examples
@@ -182,13 +182,28 @@ cargo run -p world-models-gpc-cli -- train --synthetic --component all --epochs 
 # Train from a dataset directory
 cargo run -p world-models-gpc-cli -- train --data data --component world-model --epochs 50 --horizon 8
 
+# Save checkpoints to a custom directory
+cargo run -p world-models-gpc-cli -- train --synthetic --component all --output runs/exp-001
+
 # Run evaluator demos
 cargo run -p world-models-gpc-cli -- eval --demo --strategy rank --num-candidates 64
 cargo run -p world-models-gpc-cli -- eval --demo --strategy opt --opt-steps 10
 
 # Inspect artifacts
 cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path model.onnx
+
+# Convert a Burn checkpoint between formats
+cargo run -p world-models-gpc-cli -- checkpoint --action convert --path checkpoints/policy_final.bin
+cargo run -p world-models-gpc-cli -- checkpoint --action convert --path checkpoints/world_model_final.mpk --output exported/world_model_final
 ```
+
+Training now persists real Burn artifacts by default:
+
+- `policy_final.bin` plus `policy_final.meta.json`
+- `world_model_phase1.bin` plus `world_model_phase1.meta.json`
+- `world_model_final.bin` plus `world_model_final.meta.json`
+
+The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
 
 ## Minimal Library Example
 
@@ -275,8 +290,7 @@ CI workflow: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 ## Limitations
 
 - The `eval` CLI command is mainly a demo surface. It does not yet load trained checkpoints for full deployment.
-- `checkpoint convert` is stubbed out.
-- Training does not persist model weights to disk yet.
+- `checkpoint convert` only covers Burn `.bin` and `.mpk` checkpoints for policy and world-model modules.
 - No benchmark scripts or task-level regression suites.
 
 ## References

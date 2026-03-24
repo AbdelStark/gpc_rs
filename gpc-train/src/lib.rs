@@ -10,5 +10,5 @@ pub mod policy_trainer;
 pub mod world_model_trainer;
 
 pub use data::{GpcDataset, GpcDatasetConfig};
-pub use policy_trainer::PolicyTrainer;
-pub use world_model_trainer::WorldModelTrainer;
+pub use policy_trainer::{PolicyTrainer, PolicyTrainingResult};
+pub use world_model_trainer::{WorldModelTrainer, WorldModelTrainingResult};

@@ -12,6 +12,8 @@ name = "gpc_compat"
 
 [dependencies]
 gpc-core = { workspace = true }
+gpc-policy = { workspace = true }
+gpc-world = { workspace = true }
 burn = { workspace = true }
 tract-onnx = { workspace = true }
 tract-core = { workspace = true }
@@ -22,3 +24,4 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 burn-ndarray = { workspace = true }
+tempfile = "3"
