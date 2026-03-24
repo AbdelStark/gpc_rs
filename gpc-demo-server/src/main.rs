@@ -374,8 +374,7 @@ async fn main() {
         .init();
 
     tracing::info!("bootstrapping engine (training models)…");
-    let engine = Engine::bootstrap(BuildConfig::default())
-        .expect("engine bootstrap failed");
+    let engine = Engine::bootstrap(BuildConfig::default()).expect("engine bootstrap failed");
     tracing::info!("engine ready, starting HTTP server");
 
     let state: AppState = Arc::new(Mutex::new(engine));
