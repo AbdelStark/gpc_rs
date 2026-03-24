@@ -8,6 +8,38 @@ use burn::prelude::*;
 use gpc_core::Result;
 use gpc_core::traits::{Evaluator, Policy, RewardFunction, WorldModel};
 
+/// Trace for a single optimization step in GPC-OPT.
+pub struct GpcOptStepTrace<B: Backend> {
+    /// Zero-based optimization step index.
+    pub step_index: usize,
+    /// Action sequence evaluated at this step.
+    pub actions: Tensor<B, 3>,
+    /// Predicted rollout for the current actions.
+    pub predicted_states: Tensor<B, 3>,
+    /// Reward assigned to the predicted rollout.
+    pub reward: Tensor<B, 1>,
+    /// Finite-difference gradient estimate used for the update.
+    pub gradient: Tensor<B, 3>,
+    /// Action sequence after the update is applied.
+    pub updated_actions: Tensor<B, 3>,
+}
+
+/// Full trace for a GPC-OPT evaluation run.
+pub struct GpcOptTrace<B: Backend> {
+    /// Initial policy sample used to warm-start optimization.
+    pub initial_actions: Tensor<B, 3>,
+    /// Final optimized action sequence.
+    pub optimized_actions: Tensor<B, 3>,
+    /// Per-step optimization trace.
+    pub step_traces: Vec<GpcOptStepTrace<B>>,
+    /// Number of optimization steps configured for this run.
+    pub num_opt_steps: usize,
+    /// Learning rate used for updates.
+    pub learning_rate: f32,
+    /// Finite-difference epsilon used for gradient estimation.
+    pub epsilon: f32,
+}
+
 /// GPC-OPT evaluator.
 ///
 /// Optimizes action sequences by computing reward gradients through
@@ -94,30 +126,49 @@ where
     W: WorldModel<B>,
     R: RewardFunction<B>,
 {
-    /// Optimize an action sequence using finite-difference gradient estimation.
+    /// Select an action sequence and return the full inspection trace.
+    pub fn select_action_with_trace(
+        &self,
+        obs_history: &Tensor<B, 3>,
+        current_state: &Tensor<B, 2>,
+        device: &B::Device,
+    ) -> Result<GpcOptTrace<B>> {
+        // 1. Warm-start: sample initial trajectory from policy.
+        let initial_actions = self.policy.sample(obs_history, device)?;
+
+        // 2. Optimize via gradient ascent through world model.
+        self.optimize_actions_with_trace(initial_actions, current_state)
+    }
+
+    /// Optimize an action sequence and return the full inspection trace.
     ///
     /// Since Burn's NdArray backend doesn't support autodiff natively for
     /// arbitrary operations, we use finite differences as a fallback for
     /// gradient estimation. When using the Autodiff backend, this can be
     /// replaced with true backpropagation.
-    fn optimize_actions(
+    fn optimize_actions_with_trace(
         &self,
         initial_actions: Tensor<B, 3>,
         current_state: &Tensor<B, 2>,
-    ) -> Result<Tensor<B, 3>> {
+    ) -> Result<GpcOptTrace<B>> {
         let [batch_size, horizon, action_dim] = initial_actions.dims();
-        let mut actions = initial_actions;
+        let mut actions = initial_actions.clone();
+        let mut step_traces = Vec::with_capacity(self.num_opt_steps);
 
         let epsilon = 1e-3_f32;
 
-        for _step in 0..self.num_opt_steps {
-            // Compute current reward
-            let predicted_states = self.world_model.rollout(current_state, &actions)?;
+        for step_index in 0..self.num_opt_steps {
+            let actions_before_update = actions.clone();
+
+            // Compute current reward.
+            let predicted_states = self
+                .world_model
+                .rollout(current_state, &actions_before_update)?;
             let current_reward = self.reward_fn.compute_reward(&predicted_states)?;
             let current_reward_f32: f32 = current_reward.clone().into_scalar().elem();
 
-            // Estimate gradient for each action dimension using finite differences
-            let actions_data: Vec<f32> = actions
+            // Estimate gradient for each action dimension using finite differences.
+            let actions_data: Vec<f32> = actions_before_update
                 .clone()
                 .reshape([batch_size * horizon * action_dim])
                 .into_data()
@@ -133,7 +184,7 @@ where
                 let mut perturbed = actions_data.clone();
                 perturbed[i] += epsilon;
 
-                let device = actions.device();
+                let device = actions_before_update.device();
                 let perturbed_tensor = Tensor::<B, 1>::from_floats(perturbed.as_slice(), &device)
                     .reshape([batch_size, horizon, action_dim]);
 
@@ -145,15 +196,53 @@ where
                 grad_data[i] = (perturbed_f32 - current_reward_f32) / epsilon;
             }
 
-            // Update actions: a = a + lr * grad (gradient ascent)
-            let device = actions.device();
+            // Update actions: a = a + lr * grad (gradient ascent).
+            let device = actions_before_update.device();
             let grad_tensor = Tensor::<B, 1>::from_floats(grad_data.as_slice(), &device)
                 .reshape([batch_size, horizon, action_dim]);
+            let updated_actions =
+                actions_before_update.clone() + grad_tensor.clone() * self.learning_rate;
 
-            actions = actions + grad_tensor * self.learning_rate;
+            step_traces.push(GpcOptStepTrace {
+                step_index,
+                actions: actions_before_update,
+                predicted_states,
+                reward: current_reward,
+                gradient: grad_tensor,
+                updated_actions: updated_actions.clone(),
+            });
+
+            actions = updated_actions;
         }
 
-        Ok(actions)
+        Ok(GpcOptTrace {
+            initial_actions,
+            optimized_actions: actions,
+            step_traces,
+            num_opt_steps: self.num_opt_steps,
+            learning_rate: self.learning_rate,
+            epsilon,
+        })
+    }
+
+    /// Optimize an action sequence using finite-difference gradient estimation.
+    pub fn optimize_actions(
+        &self,
+        initial_actions: Tensor<B, 3>,
+        current_state: &Tensor<B, 2>,
+    ) -> Result<Tensor<B, 3>> {
+        Ok(self
+            .optimize_actions_with_trace(initial_actions, current_state)?
+            .optimized_actions)
+    }
+
+    /// Optimize an action sequence and return the full inspection trace.
+    pub fn optimize_actions_trace(
+        &self,
+        initial_actions: Tensor<B, 3>,
+        current_state: &Tensor<B, 2>,
+    ) -> Result<GpcOptTrace<B>> {
+        self.optimize_actions_with_trace(initial_actions, current_state)
     }
 }
 
@@ -170,13 +259,9 @@ where
         current_state: &Tensor<B, 2>,
         device: &B::Device,
     ) -> Result<Tensor<B, 3>> {
-        // 1. Warm-start: sample initial trajectory from policy
-        let initial_actions = self.policy.sample(obs_history, device)?;
+        let optimized = self.select_action_with_trace(obs_history, current_state, device)?;
 
-        // 2. Optimize via gradient ascent through world model
-        let optimized = self.optimize_actions(initial_actions, current_state)?;
-
-        Ok(optimized)
+        Ok(optimized.optimized_actions)
     }
 }
 
@@ -263,5 +348,21 @@ mod tests {
 
         let best_action = evaluator.select_action(&obs, &state, &device).unwrap();
         assert_eq!(best_action.dims(), [1, 4, 2]);
+
+        let trace = evaluator
+            .select_action_with_trace(&obs, &state, &device)
+            .unwrap();
+        assert_eq!(trace.initial_actions.dims(), [1, 4, 2]);
+        assert_eq!(trace.optimized_actions.dims(), [1, 4, 2]);
+        assert_eq!(trace.step_traces.len(), 2);
+        assert_eq!(trace.num_opt_steps, 2);
+        assert_eq!(trace.learning_rate, 0.01);
+        assert_eq!(trace.epsilon, 1e-3_f32);
+        assert_eq!(trace.step_traces[0].step_index, 0);
+        assert_eq!(trace.step_traces[0].actions.dims(), [1, 4, 2]);
+        assert_eq!(trace.step_traces[0].predicted_states.dims(), [1, 4, 5]);
+        assert_eq!(trace.step_traces[0].reward.dims(), [1]);
+        assert_eq!(trace.step_traces[0].gradient.dims(), [1, 4, 2]);
+        assert_eq!(trace.step_traces[0].updated_actions.dims(), [1, 4, 2]);
     }
 }

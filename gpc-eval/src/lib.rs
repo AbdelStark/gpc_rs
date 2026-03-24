@@ -20,5 +20,5 @@
 pub mod gpc_opt;
 pub mod gpc_rank;
 
-pub use gpc_opt::{GpcOpt, GpcOptBuilder};
-pub use gpc_rank::{GpcRank, GpcRankBuilder};
+pub use gpc_opt::{GpcOpt, GpcOptBuilder, GpcOptStepTrace, GpcOptTrace};
+pub use gpc_rank::{GpcRank, GpcRankBuilder, GpcRankTrace};

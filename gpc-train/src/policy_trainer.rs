@@ -18,6 +18,8 @@ pub struct PolicyTrainingResult<B: burn::tensor::backend::Backend> {
     pub final_epoch: Option<usize>,
     /// Final averaged loss for the last epoch, if any.
     pub final_loss: Option<f32>,
+    /// Average loss for each completed epoch.
+    pub epoch_losses: Vec<f32>,
 }
 
 /// Diffusion policy trainer.
@@ -62,6 +64,7 @@ impl PolicyTrainer {
         let mut model = policy_config.init::<B>(device);
         let mut final_epoch = None;
         let mut final_loss = None;
+        let mut epoch_losses = Vec::with_capacity(self.training_config.num_epochs);
 
         let schedule = DdpmSchedule::new(&self.policy_config.noise_schedule);
 
@@ -76,6 +79,7 @@ impl PolicyTrainer {
                 model,
                 final_epoch,
                 final_loss,
+                epoch_losses,
             };
         }
 
@@ -152,6 +156,7 @@ impl PolicyTrainer {
             let avg_loss = epoch_loss / num_batches as f32;
             final_epoch = Some(epoch + 1);
             final_loss = Some(avg_loss);
+            epoch_losses.push(avg_loss);
 
             if epoch % self.training_config.log_every == 0 {
                 tracing::info!(
@@ -168,6 +173,7 @@ impl PolicyTrainer {
             model,
             final_epoch,
             final_loss,
+            epoch_losses,
         }
     }
 }
@@ -217,6 +223,7 @@ mod tests {
         let trainer = PolicyTrainer::new(training_config, policy_config);
         let result = trainer.train_with_summary::<TestBackend>(&dataset, &device);
         assert_eq!(result.final_epoch, Some(2));
-        assert!(result.final_loss.is_some());
+        assert_eq!(result.epoch_losses.len(), 2);
+        assert_eq!(result.final_loss, result.epoch_losses.last().copied());
     }
 }

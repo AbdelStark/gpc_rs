@@ -5,6 +5,22 @@ use burn::prelude::*;
 use gpc_core::Result;
 use gpc_core::traits::{Evaluator, Policy, RewardFunction, WorldModel};
 
+/// Detailed trace for a single GPC-RANK evaluation.
+pub struct GpcRankTrace<B: Backend> {
+    /// Candidate action sequences sampled from the policy.
+    pub candidate_actions: Tensor<B, 3>,
+    /// Predicted rollouts for each candidate action sequence.
+    pub predicted_states: Tensor<B, 3>,
+    /// Scalar reward for each candidate trajectory.
+    pub rewards: Tensor<B, 1>,
+    /// Index of the winning candidate.
+    pub best_index: usize,
+    /// Winning action sequence.
+    pub best_action: Tensor<B, 3>,
+    /// Number of candidates evaluated.
+    pub num_candidates: usize,
+}
+
 /// GPC-RANK evaluator.
 ///
 /// Samples K candidate trajectories from the policy, scores them
@@ -74,6 +90,59 @@ where
     }
 }
 
+impl<B, P, W, R> GpcRank<B, P, W, R>
+where
+    B: Backend,
+    P: Policy<B>,
+    W: WorldModel<B>,
+    R: RewardFunction<B>,
+{
+    /// Evaluate candidates and return the full inspection trace.
+    pub fn select_action_with_trace(
+        &self,
+        obs_history: &Tensor<B, 3>,
+        current_state: &Tensor<B, 2>,
+        device: &B::Device,
+    ) -> Result<GpcRankTrace<B>> {
+        let k = self.num_candidates;
+
+        // 1. Sample K candidate action sequences
+        let candidate_actions = self.policy.sample_k(obs_history, k, device)?;
+        let [_, horizon, action_dim] = candidate_actions.dims();
+
+        // 2. Repeat current state K times
+        let states_repeated = gpc_core::tensor_utils::repeat_batch_2d(current_state, k);
+
+        // 3. Roll out world model for each candidate
+        let predicted_states = self
+            .world_model
+            .rollout(&states_repeated, &candidate_actions)?;
+
+        // 4. Score each trajectory
+        let rewards = self.reward_fn.compute_reward(&predicted_states)?;
+
+        // 5. Find the best trajectory (argmax over rewards)
+        let best_idx: i64 = rewards.clone().argmax(0).into_scalar().elem();
+        let best_index = best_idx as usize;
+
+        // 6. Extract the best action sequence
+        let best_action = candidate_actions.clone().slice([
+            best_index..best_index + 1,
+            0..horizon,
+            0..action_dim,
+        ]);
+
+        Ok(GpcRankTrace {
+            candidate_actions,
+            predicted_states,
+            rewards,
+            best_index,
+            best_action,
+            num_candidates: k,
+        })
+    }
+}
+
 impl<B, P, W, R> Evaluator<B> for GpcRank<B, P, W, R>
 where
     B: Backend,
@@ -87,29 +156,9 @@ where
         current_state: &Tensor<B, 2>,
         device: &B::Device,
     ) -> Result<Tensor<B, 3>> {
-        let k = self.num_candidates;
-
-        // 1. Sample K candidate action sequences
-        let candidates = self.policy.sample_k(obs_history, k, device)?;
-        let [_, horizon, action_dim] = candidates.dims();
-
-        // 2. Repeat current state K times
-        let states_repeated = gpc_core::tensor_utils::repeat_batch_2d(current_state, k);
-
-        // 3. Roll out world model for each candidate
-        let predicted_states = self.world_model.rollout(&states_repeated, &candidates)?;
-
-        // 4. Score each trajectory
-        let rewards = self.reward_fn.compute_reward(&predicted_states)?;
-
-        // 5. Find the best trajectory (argmax over rewards)
-        let best_idx: i64 = rewards.argmax(0).into_scalar().elem();
-        let best_idx = best_idx as usize;
-
-        // 6. Extract the best action sequence
-        let best_actions = candidates.slice([best_idx..best_idx + 1, 0..horizon, 0..action_dim]);
-
-        Ok(best_actions)
+        Ok(self
+            .select_action_with_trace(obs_history, current_state, device)?
+            .best_action)
     }
 }
 
@@ -195,5 +244,15 @@ mod tests {
 
         let best_action = evaluator.select_action(&obs, &state, &device).unwrap();
         assert_eq!(best_action.dims(), [1, 8, 2]);
+
+        let trace = evaluator
+            .select_action_with_trace(&obs, &state, &device)
+            .unwrap();
+        assert_eq!(trace.num_candidates, 10);
+        assert_eq!(trace.candidate_actions.dims(), [10, 8, 2]);
+        assert_eq!(trace.predicted_states.dims(), [10, 8, 10]);
+        assert_eq!(trace.rewards.dims(), [10]);
+        assert_eq!(trace.best_index, 0);
+        assert_eq!(trace.best_action.dims(), [1, 8, 2]);
     }
 }

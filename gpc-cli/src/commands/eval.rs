@@ -125,12 +125,54 @@ struct EvaluationWindow {
 #[derive(Debug, Clone)]
 struct EvaluationReport {
     strategy: EvaluationStrategy,
+    mode: EvaluationMode,
     windows_evaluated: usize,
     mean_rollout_mse: f32,
     mean_terminal_distance: f32,
     mean_action_mse: f32,
     mean_reward: f32,
     success_rate: f32,
+    num_candidates: usize,
+    opt_steps: usize,
+    opt_learning_rate: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvaluationMode {
+    DatasetOpenLoop,
+    SyntheticClosedLoop,
+}
+
+impl EvaluationMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DatasetOpenLoop => "dataset-open-loop",
+            Self::SyntheticClosedLoop => "synthetic-closed-loop",
+        }
+    }
+
+    fn unit_label(self) -> &'static str {
+        match self {
+            Self::DatasetOpenLoop => "windows",
+            Self::SyntheticClosedLoop => "episodes",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClosedLoopEpisodeMetrics {
+    rollout_mse: f32,
+    terminal_distance: f32,
+    action_mse: f32,
+    reward: f32,
+    success: bool,
+    replans: usize,
+    executed_steps: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CheckpointEvalSettings {
+    strategy: EvaluationStrategy,
     num_candidates: usize,
     opt_steps: usize,
     opt_learning_rate: f32,
@@ -158,7 +200,11 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
     let strategy = EvaluationStrategy::parse(&args.strategy)?;
     let device = <EvalBackend as Backend>::Device::default();
     let models = load_models(args, &device)?;
-    let windows = load_evaluation_windows(args, &models, config.training.seed)?;
+    let mode = if args.synthetic || args.data.is_none() {
+        EvaluationMode::SyntheticClosedLoop
+    } else {
+        EvaluationMode::DatasetOpenLoop
+    };
 
     let num_candidates = args
         .num_candidates
@@ -172,25 +218,46 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
         .opt_learning_rate
         .unwrap_or(config.gpc_opt.opt_learning_rate as f32)
         .max(f32::EPSILON);
-
-    tracing::info!(
-        strategy = strategy.label(),
-        windows = windows.len(),
-        policy_checkpoint = %resolved_policy_checkpoint_path(args).display(),
-        world_model_checkpoint = %resolved_world_model_checkpoint_path(args).display(),
-        opt_learning_rate,
-        "Starting checkpoint-backed evaluation"
-    );
-
-    let report = evaluate_windows(
-        &models,
-        &windows,
+    let settings = CheckpointEvalSettings {
         strategy,
         num_candidates,
         opt_steps,
         opt_learning_rate,
-        &device,
-    )?;
+    };
+
+    tracing::info!(
+        strategy = settings.strategy.label(),
+        mode = mode.label(),
+        policy_checkpoint = %resolved_policy_checkpoint_path(args).display(),
+        world_model_checkpoint = %resolved_world_model_checkpoint_path(args).display(),
+        opt_learning_rate = settings.opt_learning_rate,
+        "Starting checkpoint-backed evaluation"
+    );
+
+    let report = match mode {
+        EvaluationMode::DatasetOpenLoop => {
+            let windows = load_evaluation_windows(args, &models)?;
+            evaluate_windows(
+                &models,
+                &windows,
+                settings.strategy,
+                settings.num_candidates,
+                settings.opt_steps,
+                settings.opt_learning_rate,
+                &device,
+            )?
+        }
+        EvaluationMode::SyntheticClosedLoop => {
+            let episodes = load_synthetic_episodes(args, &models, config.training.seed)?;
+            evaluate_synthetic_closed_loop(
+                &models,
+                &episodes,
+                settings,
+                args.seed.unwrap_or(config.training.seed),
+                &device,
+            )?
+        }
+    };
 
     Ok(report)
 }
@@ -250,24 +317,8 @@ fn load_models(
 fn load_evaluation_windows(
     args: &EvalArgs,
     models: &LoadedModels<EvalBackend>,
-    default_seed: u64,
 ) -> Result<Vec<EvaluationWindow>> {
-    let episodes = if args.synthetic || args.data.is_none() {
-        let episode_length = args
-            .episode_length
-            .max(models.policy_config.pred_horizon + 1);
-        generate_synthetic_episodes(
-            models.world_model_config.state_dim,
-            models.world_model_config.action_dim,
-            models.policy_config.obs_dim,
-            episode_length,
-            args.episodes.max(1),
-            args.seed.unwrap_or(default_seed),
-        )
-    } else {
-        load_episodes_from_path(args.data.as_deref().context("missing data path")?)?
-    };
-
+    let episodes = load_episodes_from_path(args.data.as_deref().context("missing data path")?)?;
     validate_episodes_for_evaluation(&episodes, &models.policy_config, &models.world_model_config)?;
 
     let windows = build_windows(
@@ -281,6 +332,32 @@ fn load_evaluation_windows(
     }
 
     Ok(windows)
+}
+
+fn load_synthetic_episodes(
+    args: &EvalArgs,
+    models: &LoadedModels<EvalBackend>,
+    default_seed: u64,
+) -> Result<Vec<Episode>> {
+    let episode_length = args
+        .episode_length
+        .max(models.policy_config.pred_horizon + 1);
+    let episodes = generate_synthetic_episodes(
+        models.world_model_config.state_dim,
+        models.world_model_config.action_dim,
+        models.policy_config.obs_dim,
+        episode_length,
+        args.episodes.max(1),
+        args.seed.unwrap_or(default_seed),
+    );
+
+    validate_episodes_for_closed_loop(
+        &episodes,
+        &models.policy_config,
+        &models.world_model_config,
+    )?;
+
+    Ok(episodes)
 }
 
 fn evaluate_windows(
@@ -320,25 +397,19 @@ fn evaluate_windows(
         .init::<EvalBackend>(device)
         .with_goal(tensor_1d::<EvalBackend>(&goal_state, device));
 
-        let selected_actions = match strategy {
-            EvaluationStrategy::Rank => GpcRankBuilder::new(
-                models.policy.clone(),
-                models.world_model.clone(),
-                reward_fn_eval,
-            )
-            .num_candidates(num_candidates)
-            .build()
-            .select_action(&obs_history, &current_state, device)?,
-            EvaluationStrategy::Opt => GpcOptBuilder::new(
-                models.policy.clone(),
-                models.world_model.clone(),
-                reward_fn_eval,
-            )
-            .num_opt_steps(opt_steps)
-            .learning_rate(opt_learning_rate)
-            .build()
-            .select_action(&obs_history, &current_state, device)?,
-        };
+        let selected_actions = select_action_sequence_with_trace(
+            models,
+            &obs_history,
+            &current_state,
+            reward_fn_eval,
+            CheckpointEvalSettings {
+                strategy,
+                num_candidates,
+                opt_steps,
+                opt_learning_rate,
+            },
+            device,
+        )?;
 
         let predicted_states = models
             .world_model
@@ -373,6 +444,7 @@ fn evaluate_windows(
     let denom = windows_evaluated as f32;
     Ok(EvaluationReport {
         strategy,
+        mode: EvaluationMode::DatasetOpenLoop,
         windows_evaluated,
         mean_rollout_mse: rollout_mse_sum / denom,
         mean_terminal_distance: terminal_distance_sum / denom,
@@ -383,6 +455,200 @@ fn evaluate_windows(
         opt_steps,
         opt_learning_rate,
     })
+}
+
+fn evaluate_synthetic_closed_loop(
+    models: &LoadedModels<EvalBackend>,
+    episodes: &[Episode],
+    settings: CheckpointEvalSettings,
+    seed: u64,
+    device: &<EvalBackend as Backend>::Device,
+) -> Result<EvaluationReport> {
+    let mut episodes_evaluated = 0usize;
+    let mut rollout_mse_sum = 0.0_f32;
+    let mut terminal_distance_sum = 0.0_f32;
+    let mut action_mse_sum = 0.0_f32;
+    let mut reward_sum = 0.0_f32;
+    let mut success_count = 0usize;
+    let mut total_replans = 0usize;
+    let mut total_executed_steps = 0usize;
+
+    for (episode_index, episode) in episodes.iter().enumerate() {
+        let metrics =
+            evaluate_closed_loop_episode(models, episode, episode_index, settings, seed, device)?;
+
+        rollout_mse_sum += metrics.rollout_mse;
+        terminal_distance_sum += metrics.terminal_distance;
+        action_mse_sum += metrics.action_mse;
+        reward_sum += metrics.reward;
+        total_replans += metrics.replans;
+        total_executed_steps += metrics.executed_steps;
+        episodes_evaluated += 1;
+        if metrics.success {
+            success_count += 1;
+        }
+    }
+
+    let denom = episodes_evaluated as f32;
+    tracing::info!(
+        episodes = episodes_evaluated,
+        replans = total_replans,
+        executed_steps = total_executed_steps,
+        action_horizon = models.policy_config.action_horizon,
+        "Synthetic closed-loop evaluation complete"
+    );
+
+    Ok(EvaluationReport {
+        strategy: settings.strategy,
+        mode: EvaluationMode::SyntheticClosedLoop,
+        windows_evaluated: episodes_evaluated,
+        mean_rollout_mse: rollout_mse_sum / denom,
+        mean_terminal_distance: terminal_distance_sum / denom,
+        mean_action_mse: action_mse_sum / denom,
+        mean_reward: reward_sum / denom,
+        success_rate: success_count as f32 / denom,
+        num_candidates: settings.num_candidates,
+        opt_steps: settings.opt_steps,
+        opt_learning_rate: settings.opt_learning_rate,
+    })
+}
+
+fn evaluate_closed_loop_episode(
+    models: &LoadedModels<EvalBackend>,
+    episode: &Episode,
+    episode_index: usize,
+    settings: CheckpointEvalSettings,
+    seed: u64,
+    device: &<EvalBackend as Backend>::Device,
+) -> Result<ClosedLoopEpisodeMetrics> {
+    let goal_state = episode
+        .states
+        .last()
+        .cloned()
+        .with_context(|| format!("episode {episode_index} is missing a goal state"))?;
+    let mut actual_state = episode
+        .states
+        .first()
+        .cloned()
+        .with_context(|| format!("episode {episode_index} is missing an initial state"))?;
+    let action_horizon = models
+        .policy_config
+        .action_horizon
+        .clamp(1, models.policy_config.pred_horizon);
+    let mut obs_history = vec![
+        observation_from_state(&actual_state, models.policy_config.obs_dim);
+        models.policy_config.obs_horizon
+    ];
+    let mut executed_actions = Vec::with_capacity(episode.actions.len());
+    let mut executed_states = Vec::with_capacity(episode.actions.len());
+    let mut predicted_states = Vec::with_capacity(episode.actions.len());
+    let mut replans = 0usize;
+    let mut action_index = 0usize;
+    let mut rng = StdRng::seed_from_u64(closed_loop_seed(seed, episode_index));
+
+    while action_index < episode.actions.len() {
+        let obs_tensor = tensor_3d::<EvalBackend>(&obs_history, device)?;
+        let current_state = tensor_2d::<EvalBackend>(&actual_state, device)?;
+        let reward_fn_eval = L2RewardFunctionConfig {
+            state_dim: models.world_model_config.state_dim,
+        }
+        .init::<EvalBackend>(device)
+        .with_goal(tensor_1d::<EvalBackend>(&goal_state, device));
+        let selected_actions = select_action_sequence_with_trace(
+            models,
+            &obs_tensor,
+            &current_state,
+            reward_fn_eval,
+            settings,
+            device,
+        )?;
+        let predicted_rollout = models
+            .world_model
+            .rollout(&current_state, &selected_actions)?;
+        let planned_actions = tensor_single_batch_sequence_to_rows(selected_actions)?;
+        let planned_states = tensor_single_batch_sequence_to_rows(predicted_rollout)?;
+        let execute_steps = action_horizon
+            .min(episode.actions.len() - action_index)
+            .min(planned_actions.len())
+            .min(planned_states.len());
+
+        for step_offset in 0..execute_steps {
+            let action = planned_actions[step_offset].clone();
+            actual_state = synthetic_transition(&mut rng, &actual_state, &action);
+            predicted_states.push(planned_states[step_offset].clone());
+            executed_actions.push(action);
+            executed_states.push(actual_state.clone());
+            obs_history.remove(0);
+            obs_history.push(observation_from_state(
+                &actual_state,
+                models.policy_config.obs_dim,
+            ));
+        }
+
+        action_index += execute_steps;
+        replans += 1;
+    }
+
+    let reward_fn_metric = L2RewardFunctionConfig {
+        state_dim: models.world_model_config.state_dim,
+    }
+    .init::<EvalBackend>(device)
+    .with_goal(tensor_1d::<EvalBackend>(&goal_state, device));
+    let executed_rollout = tensor_3d::<EvalBackend>(&executed_states, device)?;
+    let reward_value: f32 = reward_fn_metric
+        .compute_reward(&executed_rollout)?
+        .into_scalar()
+        .elem();
+    let rollout_mse = mean_squared_error(
+        &flatten_rows(&predicted_states),
+        &flatten_rows(&executed_states),
+    );
+    let terminal_distance = l2_distance(&actual_state, &goal_state);
+    let action_mse = mean_squared_error(
+        &flatten_rows(&executed_actions),
+        &flatten_rows(&episode.actions),
+    );
+
+    Ok(ClosedLoopEpisodeMetrics {
+        rollout_mse,
+        terminal_distance,
+        action_mse,
+        reward: reward_value,
+        success: terminal_distance < 0.1,
+        replans,
+        executed_steps: executed_actions.len(),
+    })
+}
+
+fn select_action_sequence_with_trace(
+    models: &LoadedModels<EvalBackend>,
+    obs_history: &Tensor<EvalBackend, 3>,
+    current_state: &Tensor<EvalBackend, 2>,
+    reward_fn: gpc_world::reward::L2RewardFunction<EvalBackend>,
+    settings: CheckpointEvalSettings,
+    device: &<EvalBackend as Backend>::Device,
+) -> Result<Tensor<EvalBackend, 3>> {
+    match settings.strategy {
+        EvaluationStrategy::Rank => {
+            Ok(
+                GpcRankBuilder::new(models.policy.clone(), models.world_model.clone(), reward_fn)
+                    .num_candidates(settings.num_candidates)
+                    .build()
+                    .select_action_with_trace(obs_history, current_state, device)?
+                    .best_action,
+            )
+        }
+        EvaluationStrategy::Opt => {
+            Ok(
+                GpcOptBuilder::new(models.policy.clone(), models.world_model.clone(), reward_fn)
+                    .num_opt_steps(settings.opt_steps)
+                    .learning_rate(settings.opt_learning_rate)
+                    .build()
+                    .select_action_with_trace(obs_history, current_state, device)?
+                    .optimized_actions,
+            )
+        }
+    }
 }
 
 fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
@@ -521,6 +787,27 @@ fn generate_synthetic_episodes(
     episodes
 }
 
+fn synthetic_transition(rng: &mut StdRng, state: &[f32], action: &[f32]) -> Vec<f32> {
+    state
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            let action_term = action.get(index).copied().unwrap_or(0.0);
+            value + 0.1 * action_term + rng.gen_range(-0.01..0.01)
+        })
+        .collect()
+}
+
+fn observation_from_state(state: &[f32], obs_dim: usize) -> Vec<f32> {
+    state[..obs_dim.min(state.len())].to_vec()
+}
+
+fn closed_loop_seed(seed: u64, episode_index: usize) -> u64 {
+    seed ^ ((episode_index as u64)
+        .wrapping_add(1)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 fn build_windows(
     episodes: &[Episode],
     obs_horizon: usize,
@@ -581,6 +868,22 @@ fn validate_episodes_for_evaluation(
 
     if usable_windows == 0 {
         anyhow::bail!("dataset does not contain any usable evaluation windows");
+    }
+
+    Ok(())
+}
+
+fn validate_episodes_for_closed_loop(
+    episodes: &[Episode],
+    policy_config: &PolicyConfig,
+    world_model_config: &WorldModelConfig,
+) -> Result<()> {
+    if episodes.is_empty() {
+        anyhow::bail!("synthetic evaluation did not generate any episodes");
+    }
+
+    for (episode_index, episode) in episodes.iter().enumerate() {
+        validate_episode(episode, episode_index, policy_config, world_model_config)?;
     }
 
     Ok(())
@@ -732,7 +1035,12 @@ fn default_world_model_checkpoint_path(args: &EvalArgs) -> PathBuf {
 fn log_eval_report(report: &EvaluationReport) {
     tracing::info!("Checkpoint evaluation complete");
     tracing::info!("  strategy: {}", report.strategy.label());
-    tracing::info!("  windows: {}", report.windows_evaluated);
+    tracing::info!("  mode: {}", report.mode.label());
+    tracing::info!(
+        "  {}: {}",
+        report.mode.unit_label(),
+        report.windows_evaluated
+    );
     tracing::info!("  mean rollout MSE: {:.6}", report.mean_rollout_mse);
     tracing::info!(
         "  mean terminal distance: {:.6}",
@@ -794,6 +1102,24 @@ fn tensor_to_vec<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Result<Vec
         .expect("tensor data should always be contiguous"))
 }
 
+fn tensor_single_batch_sequence_to_rows<B: Backend>(tensor: Tensor<B, 3>) -> Result<Vec<Vec<f32>>> {
+    let [batch_size, horizon, row_dim] = tensor.dims();
+    if batch_size != 1 {
+        anyhow::bail!("expected a batch size of 1, got {batch_size}");
+    }
+
+    let flat = tensor_to_vec(tensor)?;
+    Ok(flat
+        .chunks(row_dim)
+        .take(horizon)
+        .map(|row| row.to_vec())
+        .collect())
+}
+
+fn flatten_rows(rows: &[Vec<f32>]) -> Vec<f32> {
+    rows.iter().flat_map(|row| row.iter().copied()).collect()
+}
+
 fn mean_squared_error(prediction: &[f32], target: &[f32]) -> f32 {
     assert_eq!(prediction.len(), target.len());
     prediction
@@ -819,6 +1145,18 @@ fn terminal_l2_distance(
         .zip(&target[start..start + state_dim])
         .map(|(pred, tgt)| {
             let diff = pred - tgt;
+            diff * diff
+        })
+        .sum::<f32>()
+        .sqrt()
+}
+
+fn l2_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
+    assert_eq!(lhs.len(), rhs.len());
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(lhs, rhs)| {
+            let diff = lhs - rhs;
             diff * diff
         })
         .sum::<f32>()
@@ -878,6 +1216,13 @@ mod tests {
     fn save_tiny_checkpoints(
         dir: &Path,
     ) -> Result<(PathBuf, PathBuf, PolicyConfig, WorldModelConfig)> {
+        save_tiny_checkpoints_with_action_horizon(dir, 1)
+    }
+
+    fn save_tiny_checkpoints_with_action_horizon(
+        dir: &Path,
+        action_horizon: usize,
+    ) -> Result<(PathBuf, PathBuf, PolicyConfig, WorldModelConfig)> {
         let device = <EvalBackend as Backend>::Device::default();
         let dataset = generate_synthetic_episodes(4, 2, 4, 10, 4, 42);
         let dataset_config = gpc_train::data::GpcDatasetConfig {
@@ -903,7 +1248,7 @@ mod tests {
             action_dim: 2,
             obs_horizon: 2,
             pred_horizon: 4,
-            action_horizon: 1,
+            action_horizon,
             hidden_dim: 16,
             num_res_blocks: 1,
             noise_schedule: gpc_core::config::NoiseScheduleConfig {
@@ -988,7 +1333,8 @@ mod tests {
         let report = run_checkpoint_eval(&args, &config).unwrap();
 
         assert_eq!(report.strategy, EvaluationStrategy::Rank);
-        assert!(report.windows_evaluated > 0);
+        assert_eq!(report.mode, EvaluationMode::SyntheticClosedLoop);
+        assert_eq!(report.windows_evaluated, 4);
         assert!(report.mean_rollout_mse.is_finite());
         assert!(report.mean_terminal_distance.is_finite());
         assert!(report.mean_action_mse.is_finite());
@@ -1011,6 +1357,87 @@ mod tests {
         assert_eq!(windows[0].current_state.len(), 4);
         assert_eq!(windows[0].expert_actions.len(), 4);
         assert_eq!(windows[0].target_states.len(), 4);
+    }
+
+    #[test]
+    fn dataset_eval_remains_open_loop_windowed() {
+        let dir = temp_eval_dir("dataset_open_loop");
+        let data_path = dir.join("episodes.json");
+        let (policy_path, world_model_path, _, _) = save_tiny_checkpoints(&dir).unwrap();
+        let episodes = generate_synthetic_episodes(4, 2, 4, 8, 2, 7);
+        std::fs::write(&data_path, serde_json::to_vec(&episodes).unwrap()).unwrap();
+
+        let args = EvalArgs {
+            strategy: "rank".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: Some(data_path.to_string_lossy().to_string()),
+            synthetic: false,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: None,
+            seed: Some(42),
+            demo: false,
+        };
+
+        let report = run_checkpoint_eval(&args, &GpcConfig::default()).unwrap();
+
+        assert_eq!(report.mode, EvaluationMode::DatasetOpenLoop);
+        assert_eq!(report.windows_evaluated, 8);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_closed_loop_honors_action_horizon() {
+        let dir = temp_eval_dir("closed_loop_stride");
+        let (policy_path, world_model_path, _, _) =
+            save_tiny_checkpoints_with_action_horizon(&dir, 2).unwrap();
+        let args = EvalArgs {
+            strategy: "rank".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: true,
+            episodes: 1,
+            episode_length: 9,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: None,
+            seed: Some(13),
+            demo: false,
+        };
+        let config = GpcConfig::default();
+        let device = <EvalBackend as Backend>::Device::default();
+        let models = load_models(&args, &device).unwrap();
+        let episodes = load_synthetic_episodes(&args, &models, config.training.seed).unwrap();
+
+        let metrics = evaluate_closed_loop_episode(
+            &models,
+            &episodes[0],
+            0,
+            CheckpointEvalSettings {
+                strategy: EvaluationStrategy::Rank,
+                num_candidates: 4,
+                opt_steps: 2,
+                opt_learning_rate: config.gpc_opt.opt_learning_rate as f32,
+            },
+            args.seed.unwrap(),
+            &device,
+        )
+        .unwrap();
+
+        assert_eq!(metrics.executed_steps, episodes[0].actions.len());
+        assert_eq!(metrics.replans, episodes[0].actions.len().div_ceil(2));
+        assert!(metrics.rollout_mse.is_finite());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1039,6 +1466,7 @@ mod tests {
         let report = run_checkpoint_eval(&args, &config).unwrap();
 
         assert_eq!(report.strategy, EvaluationStrategy::Opt);
+        assert_eq!(report.mode, EvaluationMode::SyntheticClosedLoop);
         assert_eq!(report.opt_steps, 1);
         assert!((report.opt_learning_rate - 0.123).abs() < 1e-6);
 
