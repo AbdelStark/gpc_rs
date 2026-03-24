@@ -519,19 +519,29 @@ fn train_policy(
             let actions_flat = tensor_utils::flatten_last_two(actions);
             let obs_flat = tensor_utils::flatten_last_two(observations);
 
-            let timesteps: Vec<f32> = (0..batch_size)
-                .map(|_| rand::random::<f32>() * (schedule.num_timesteps - 1) as f32)
+            let timestep_indices: Vec<usize> = (0..batch_size)
+                .map(|_| {
+                    (rand::random::<f32>() * schedule.num_timesteps as f32)
+                        .floor()
+                        .min((schedule.num_timesteps - 1) as f32) as usize
+                })
                 .collect();
-            let timestep_tensor =
-                Tensor::<TrainBackend, 1>::from_floats(timesteps.as_slice(), device);
+            let timestep_tensor = Tensor::<TrainBackend, 1>::from_floats(
+                timestep_indices
+                    .iter()
+                    .map(|&t| t as f32)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                device,
+            );
 
             let noise = Tensor::<TrainBackend, 2>::random(
                 [batch_size, PRED_HORIZON * ACTION_DIM],
                 Distribution::Normal(0.0, 1.0),
                 device,
             );
-            let t_index = timesteps[0].floor() as usize;
-            let noisy_actions = schedule.add_noise(&actions_flat, &noise, t_index);
+            let noisy_actions =
+                schedule.add_noise_batch(&actions_flat, &noise, timestep_indices.as_slice());
             let prediction = model.predict_noise(noisy_actions, obs_flat, timestep_tensor);
             let loss = tensor_utils::mse_loss(&prediction, &noise);
             let loss_val: f32 = loss.clone().into_scalar().elem();

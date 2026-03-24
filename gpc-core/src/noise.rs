@@ -105,10 +105,64 @@ impl DdpmSchedule {
         noise: &Tensor<B, D>,
         t: usize,
     ) -> Tensor<B, D> {
+        let t = self.clamp_timestep(t);
         let sqrt_alpha = self.sqrt_alphas_cumprod[t] as f32;
         let sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t] as f32;
 
         x_0.clone() * sqrt_alpha + noise.clone() * sqrt_one_minus_alpha
+    }
+
+    /// Forward diffusion with an independent timestep for each batch item.
+    ///
+    /// This is the batched form of [`Self::add_noise`] and is used during DDPM
+    /// training, where each sample typically draws its own timestep.
+    pub fn add_noise_batch<B: Backend, const D: usize>(
+        &self,
+        x_0: &Tensor<B, D>,
+        noise: &Tensor<B, D>,
+        timesteps: &[usize],
+    ) -> Tensor<B, D> {
+        let dims = x_0.dims();
+        assert_eq!(dims, noise.dims(), "noise tensor must match x_0 shape");
+        let batch_size = dims[0];
+        assert_eq!(
+            timesteps.len(),
+            batch_size,
+            "batch timestep count must match tensor batch size"
+        );
+
+        let device = x_0.device();
+        let sqrt_alpha = timesteps
+            .iter()
+            .map(|&t| self.sqrt_alpha(t))
+            .collect::<Vec<_>>();
+        let sqrt_one_minus_alpha = timesteps
+            .iter()
+            .map(|&t| self.sqrt_one_minus_alpha(t))
+            .collect::<Vec<_>>();
+
+        let mut coeff_shape = [1; D];
+        coeff_shape[0] = batch_size;
+
+        let sqrt_alpha =
+            Tensor::<B, 1>::from_floats(sqrt_alpha.as_slice(), &device).reshape(coeff_shape);
+        let sqrt_one_minus_alpha =
+            Tensor::<B, 1>::from_floats(sqrt_one_minus_alpha.as_slice(), &device)
+                .reshape(coeff_shape);
+
+        x_0.clone() * sqrt_alpha + noise.clone() * sqrt_one_minus_alpha
+    }
+
+    fn clamp_timestep(&self, t: usize) -> usize {
+        t.min(self.num_timesteps.saturating_sub(1))
+    }
+
+    fn sqrt_alpha(&self, t: usize) -> f32 {
+        self.sqrt_alphas_cumprod[self.clamp_timestep(t)] as f32
+    }
+
+    fn sqrt_one_minus_alpha(&self, t: usize) -> f32 {
+        self.sqrt_one_minus_alphas_cumprod[self.clamp_timestep(t)] as f32
     }
 
     /// Reverse diffusion step: denoise x_t to x_{t-1}.
@@ -216,5 +270,55 @@ mod tests {
         // At final step, noise dominates
         let max_val = x_t.max().into_scalar();
         assert!(max_val > 5.0, "At final step noise should dominate");
+    }
+
+    #[test]
+    fn test_add_noise_batch_matches_scalar_schedule_for_uniform_timesteps() {
+        let config = NoiseScheduleConfig {
+            num_timesteps: 32,
+            beta_start: 1e-4,
+            beta_end: 0.02,
+        };
+        let schedule = DdpmSchedule::new(&config);
+        let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
+
+        let x_0 = Tensor::<TestBackend, 2>::from_floats([[1.0, -1.0], [0.5, 2.0]], &device);
+        let noise = Tensor::<TestBackend, 2>::from_floats([[0.2, 0.3], [0.4, -0.1]], &device);
+
+        let batched = schedule.add_noise_batch(&x_0, &noise, &[7, 7]);
+        let scalar = schedule.add_noise(&x_0, &noise, 7);
+
+        let diff = (batched - scalar).abs().max().into_scalar();
+        assert!(
+            diff < 1e-6,
+            "uniform batch noising should match scalar noising"
+        );
+    }
+
+    #[test]
+    fn test_add_noise_batch_respects_per_sample_timesteps() {
+        let config = NoiseScheduleConfig {
+            num_timesteps: 1000,
+            beta_start: 1e-4,
+            beta_end: 0.02,
+        };
+        let schedule = DdpmSchedule::new(&config);
+        let device = <TestBackend as burn::tensor::backend::Backend>::Device::default();
+
+        let x_0 = Tensor::<TestBackend, 2>::ones([2, 2], &device);
+        let noise = Tensor::<TestBackend, 2>::from_floats([[0.5, 0.5], [0.5, 0.5]], &device);
+
+        let x_t = schedule.add_noise_batch(&x_0, &noise, &[0, 999]);
+        let values: Vec<f32> = x_t.into_data().to_vec().unwrap();
+
+        let first_expected = schedule.sqrt_alphas_cumprod[0] as f32
+            + 0.5 * schedule.sqrt_one_minus_alphas_cumprod[0] as f32;
+        let second_expected = schedule.sqrt_alphas_cumprod[999] as f32
+            + 0.5 * schedule.sqrt_one_minus_alphas_cumprod[999] as f32;
+
+        assert_relative_eq!(values[0], first_expected, epsilon = 1e-5);
+        assert_relative_eq!(values[1], first_expected, epsilon = 1e-5);
+        assert_relative_eq!(values[2], second_expected, epsilon = 1e-5);
+        assert_relative_eq!(values[3], second_expected, epsilon = 1e-5);
     }
 }

@@ -106,14 +106,22 @@ impl PolicyTrainer {
                 let obs_flat = tensor_utils::flatten_last_two(batch.observations.clone());
 
                 // Sample random timesteps
-                let timesteps_vec: Vec<f32> = (0..bs)
+                let timestep_indices: Vec<usize> = (0..bs)
                     .map(|_| {
                         (rand::random::<f32>() * schedule.num_timesteps as f32)
                             .floor()
                             .min((schedule.num_timesteps - 1) as f32)
+                            as usize
                     })
                     .collect();
-                let timesteps = Tensor::<B, 1>::from_floats(timesteps_vec.as_slice(), device);
+                let timesteps = Tensor::<B, 1>::from_floats(
+                    timestep_indices
+                        .iter()
+                        .map(|&t| t as f32)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    device,
+                );
 
                 // Sample noise
                 let noise = Tensor::<B, 2>::random(
@@ -122,10 +130,8 @@ impl PolicyTrainer {
                     device,
                 );
 
-                // Add noise to actions (per-sample timestep)
-                // For simplicity, use a uniform timestep per batch
-                let t_idx = timesteps_vec[0] as usize;
-                let noisy_actions = schedule.add_noise(&actions_flat, &noise, t_idx);
+                let noisy_actions =
+                    schedule.add_noise_batch(&actions_flat, &noise, timestep_indices.as_slice());
 
                 // Predict noise
                 let noise_pred = model.predict_noise(noisy_actions, obs_flat, timesteps);
