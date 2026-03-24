@@ -3,24 +3,10 @@
 use std::io::IsTerminal;
 
 use anyhow::Result;
-use burn::backend::Autodiff;
-use burn::backend::ndarray::NdArray;
-use burn::prelude::*;
 use clap::Args;
 
-use gpc_core::config::{PolicyConfig, TrainingConfig, WorldModelConfig};
-use gpc_core::traits::Evaluator;
-use gpc_eval::GpcRankBuilder;
-use gpc_policy::DiffusionPolicyConfig;
-use gpc_train::data::{GpcDataset, GpcDatasetConfig};
-use gpc_train::{PolicyTrainer, WorldModelTrainer};
-use gpc_world::reward::L2RewardFunctionConfig;
-use gpc_world::world_model::StateWorldModelConfig;
-
+use super::demo_pipeline::{DemoRunSummary, run_demo_pipeline};
 use super::demo_tui;
-
-type TrainBackend = Autodiff<NdArray>;
-type InferBackend = NdArray;
 
 /// Arguments for the demo command.
 #[derive(Args, Debug, Clone)]
@@ -81,114 +67,41 @@ fn run_plain_demo(args: DemoArgs) -> Result<()> {
         args.episode_length
     );
 
-    let device = <TrainBackend as Backend>::Device::default();
-
-    tracing::info!("Step 1: Generating synthetic dataset...");
-    let dataset_config = GpcDatasetConfig {
-        data_dir: "demo".to_string(),
-        state_dim: args.state_dim,
-        action_dim: args.action_dim,
-        obs_dim: args.state_dim,
-        obs_horizon: 2,
-        pred_horizon: 4,
-    };
-    let dataset = GpcDataset::generate_synthetic(
-        dataset_config,
-        args.episodes,
-        args.episode_length,
-        args.seed,
-    );
-    tracing::info!(
-        "  Generated {} episodes, {} transitions",
-        dataset.num_episodes(),
-        dataset.num_transitions()
-    );
-
-    tracing::info!("Step 2: Training world model (Phase 1)...");
-    let training_config = TrainingConfig {
-        num_epochs: args.epochs,
-        batch_size: 16,
-        learning_rate: 1e-3,
-        log_every: 1,
-        ..Default::default()
-    };
-    let world_model_config = WorldModelConfig {
-        state_dim: args.state_dim,
-        action_dim: args.action_dim,
-        hidden_dim: 32,
-        num_layers: 2,
-        ..Default::default()
-    };
-    let wm_trainer = WorldModelTrainer::new(training_config.clone(), world_model_config);
-    let _world_model = wm_trainer.train_phase1::<TrainBackend>(&dataset, &device);
-
-    tracing::info!("Step 3: Training diffusion policy...");
-    let policy_config = PolicyConfig {
-        obs_dim: args.state_dim,
-        action_dim: args.action_dim,
-        obs_horizon: 2,
-        pred_horizon: 4,
-        hidden_dim: 32,
-        num_res_blocks: 1,
-        ..Default::default()
-    };
-    let policy_trainer = PolicyTrainer::new(training_config, policy_config);
-    let _policy = policy_trainer.train::<TrainBackend>(&dataset, &device);
-
-    tracing::info!("Step 4: Running GPC-RANK evaluation...");
-    let infer_device = <InferBackend as Backend>::Device::default();
-
-    let policy_config = DiffusionPolicyConfig {
-        obs_dim: args.state_dim,
-        action_dim: args.action_dim,
-        obs_horizon: 2,
-        pred_horizon: 4,
-        hidden_dim: 32,
-        time_embed_dim: 16,
-        num_res_blocks: 1,
-        diffusion_steps: 24,
-        beta_start: 1e-4,
-        beta_end: 0.02,
-    };
-    let infer_policy = policy_config.init::<InferBackend>(&infer_device);
-
-    let wm_config = StateWorldModelConfig {
-        state_dim: args.state_dim,
-        action_dim: args.action_dim,
-        hidden_dim: 32,
-        num_layers: 2,
-    };
-    let infer_wm = wm_config.init::<InferBackend>(&infer_device);
-
-    let reward_config = L2RewardFunctionConfig {
-        state_dim: args.state_dim,
-    };
-    let reward_fn = reward_config.init::<InferBackend>(&infer_device);
-
-    let evaluator = GpcRankBuilder::new(infer_policy, infer_wm, reward_fn)
-        .num_candidates(args.num_candidates)
-        .build();
-
-    let obs = Tensor::<InferBackend, 3>::zeros([1, 2, args.state_dim], &infer_device);
-    let state = Tensor::<InferBackend, 2>::zeros([1, args.state_dim], &infer_device);
-
-    let best_action = evaluator.select_action(&obs, &state, &infer_device)?;
-    let [_, horizon, action_dim] = best_action.dims();
-
-    tracing::info!("Selected action sequence: [{horizon} steps, {action_dim} dims]");
-
-    let first_action = best_action
-        .clone()
-        .slice([0..1, 0..1, 0..action_dim])
-        .reshape([action_dim]);
-    let action_data: Vec<f32> = first_action
-        .into_data()
-        .to_vec()
-        .map_err(|e| anyhow::anyhow!("failed to extract action data: {e:?}"))?;
-    tracing::info!("First action: {:?}", action_data);
+    let summary = run_demo_pipeline(&args)?;
+    log_demo_summary(&summary);
 
     tracing::info!("=== Demo Complete ===");
     Ok(())
+}
+
+fn log_demo_summary(summary: &DemoRunSummary) {
+    tracing::info!(
+        "Pipeline summary: dataset={} episodes / {} transitions",
+        summary.dataset_episodes,
+        summary.dataset_transitions
+    );
+    tracing::info!(
+        "World model epochs/losses: phase1={:?}/{:?} phase2={:?}/{:?}",
+        summary.world_model_phase1.final_epoch,
+        summary.world_model_phase1.final_loss,
+        summary.world_model_phase2.final_epoch,
+        summary.world_model_phase2.final_loss
+    );
+    tracing::info!(
+        "Policy epoch/loss: {:?}/{:?}",
+        summary.policy.final_epoch,
+        summary.policy.final_loss
+    );
+    tracing::info!(
+        "Selected action sequence: [{}, {}, {}]",
+        summary.evaluation.selected_action_shape[0],
+        summary.evaluation.selected_action_shape[1],
+        summary.evaluation.selected_action_shape[2]
+    );
+    tracing::info!(
+        "First action preview: {}",
+        preview_vector(&summary.evaluation.selected_action_values, 4)
+    );
 }
 
 fn normalize_args(mut args: DemoArgs) -> DemoArgs {
@@ -199,4 +112,69 @@ fn normalize_args(mut args: DemoArgs) -> DemoArgs {
     args.state_dim = args.state_dim.max(2);
     args.action_dim = args.action_dim.max(1);
     args
+}
+
+fn preview_vector(values: &[f32], limit: usize) -> String {
+    let mut parts = values
+        .iter()
+        .take(limit)
+        .map(|value| format!("{value:.2}"))
+        .collect::<Vec<_>>();
+    if values.len() > limit {
+        parts.push("...".to_string());
+    }
+    format!("[{}]", parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_args_enforces_minimums() {
+        let args = DemoArgs {
+            epochs: 0,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: 0,
+            state_dim: 1,
+            action_dim: 0,
+            seed: 7,
+            plain: true,
+        };
+
+        let normalized = normalize_args(args);
+
+        assert_eq!(normalized.epochs, 1);
+        assert_eq!(normalized.episodes, 4);
+        assert_eq!(normalized.episode_length, 8);
+        assert_eq!(normalized.num_candidates, 4);
+        assert_eq!(normalized.state_dim, 2);
+        assert_eq!(normalized.action_dim, 1);
+    }
+
+    #[test]
+    fn demo_pipeline_returns_coherent_summary() {
+        let args = DemoArgs {
+            epochs: 1,
+            episodes: 4,
+            episode_length: 8,
+            num_candidates: 4,
+            state_dim: 4,
+            action_dim: 2,
+            seed: 42,
+            plain: true,
+        };
+
+        let normalized = normalize_args(args);
+        let summary = run_demo_pipeline(&normalized).unwrap();
+
+        assert_eq!(summary.dataset_episodes, 4);
+        assert_eq!(summary.dataset_transitions, 4 * (8 - 1));
+        assert_eq!(summary.world_model_phase1.final_epoch, Some(1));
+        assert_eq!(summary.world_model_phase2.final_epoch, Some(1));
+        assert_eq!(summary.policy.final_epoch, Some(1));
+        assert_eq!(summary.evaluation.selected_action_shape, [1, 4, 2]);
+        assert_eq!(summary.evaluation.selected_action_values.len(), 8);
+    }
 }
