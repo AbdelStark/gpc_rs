@@ -1,7 +1,6 @@
 //! Eval command implementation.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use burn::backend::Autodiff;
@@ -71,6 +70,14 @@ pub struct EvalArgs {
     #[arg(long)]
     opt_steps: Option<usize>,
 
+    /// Override the GPC-OPT learning rate.
+    #[arg(long)]
+    opt_learning_rate: Option<f32>,
+
+    /// Seed used for synthetic evaluation data.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// Run a demo evaluation with random models.
     #[arg(long)]
     demo: bool,
@@ -126,6 +133,7 @@ struct EvaluationReport {
     success_rate: f32,
     num_candidates: usize,
     opt_steps: usize,
+    opt_learning_rate: f32,
 }
 
 /// Run the eval command.
@@ -150,7 +158,7 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
     let strategy = EvaluationStrategy::parse(&args.strategy)?;
     let device = <EvalBackend as Backend>::Device::default();
     let models = load_models(args, &device)?;
-    let windows = load_evaluation_windows(args, &models)?;
+    let windows = load_evaluation_windows(args, &models, config.training.seed)?;
 
     let num_candidates = args
         .num_candidates
@@ -160,12 +168,17 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
         .opt_steps
         .unwrap_or(config.gpc_opt.num_opt_steps)
         .max(1);
+    let opt_learning_rate = args
+        .opt_learning_rate
+        .unwrap_or(config.gpc_opt.opt_learning_rate as f32)
+        .max(f32::EPSILON);
 
     tracing::info!(
         strategy = strategy.label(),
         windows = windows.len(),
         policy_checkpoint = %resolved_policy_checkpoint_path(args).display(),
         world_model_checkpoint = %resolved_world_model_checkpoint_path(args).display(),
+        opt_learning_rate,
         "Starting checkpoint-backed evaluation"
     );
 
@@ -175,6 +188,7 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
         strategy,
         num_candidates,
         opt_steps,
+        opt_learning_rate,
         &device,
     )?;
 
@@ -236,6 +250,7 @@ fn load_models(
 fn load_evaluation_windows(
     args: &EvalArgs,
     models: &LoadedModels<EvalBackend>,
+    default_seed: u64,
 ) -> Result<Vec<EvaluationWindow>> {
     let episodes = if args.synthetic || args.data.is_none() {
         let episode_length = args
@@ -247,23 +262,23 @@ fn load_evaluation_windows(
             models.policy_config.obs_dim,
             episode_length,
             args.episodes.max(1),
-            current_seed(),
+            args.seed.unwrap_or(default_seed),
         )
     } else {
         load_episodes_from_path(args.data.as_deref().context("missing data path")?)?
     };
 
+    validate_episodes_for_evaluation(&episodes, &models.policy_config, &models.world_model_config)?;
+
     let windows = build_windows(
         &episodes,
         models.policy_config.obs_horizon,
         models.policy_config.pred_horizon,
-    );
+    )?;
 
     if windows.is_empty() {
         anyhow::bail!("no evaluation windows available for the selected dataset");
     }
-
-    validate_episode_dimensions(&episodes, &models.policy_config, &models.world_model_config)?;
 
     Ok(windows)
 }
@@ -274,6 +289,7 @@ fn evaluate_windows(
     strategy: EvaluationStrategy,
     num_candidates: usize,
     opt_steps: usize,
+    opt_learning_rate: f32,
     device: &<EvalBackend as Backend>::Device,
 ) -> Result<EvaluationReport> {
     let mut windows_evaluated = 0usize;
@@ -284,10 +300,10 @@ fn evaluate_windows(
     let mut success_count = 0usize;
 
     for window in windows {
-        let obs_history = tensor_3d::<EvalBackend>(&window.obs_history, device);
-        let current_state = tensor_2d::<EvalBackend>(&window.current_state, device);
-        let expert_actions = tensor_3d::<EvalBackend>(&window.expert_actions, device);
-        let target_states = tensor_3d::<EvalBackend>(&window.target_states, device);
+        let obs_history = tensor_3d::<EvalBackend>(&window.obs_history, device)?;
+        let current_state = tensor_2d::<EvalBackend>(&window.current_state, device)?;
+        let expert_actions = tensor_3d::<EvalBackend>(&window.expert_actions, device)?;
+        let target_states = tensor_3d::<EvalBackend>(&window.target_states, device)?;
         let goal_state = window
             .target_states
             .last()
@@ -319,6 +335,7 @@ fn evaluate_windows(
                 reward_fn_eval,
             )
             .num_opt_steps(opt_steps)
+            .learning_rate(opt_learning_rate)
             .build()
             .select_action(&obs_history, &current_state, device)?,
         };
@@ -364,6 +381,7 @@ fn evaluate_windows(
         success_rate: success_count as f32 / denom,
         num_candidates,
         opt_steps,
+        opt_learning_rate,
     })
 }
 
@@ -507,78 +525,99 @@ fn build_windows(
     episodes: &[Episode],
     obs_horizon: usize,
     pred_horizon: usize,
-) -> Vec<EvaluationWindow> {
+) -> Result<Vec<EvaluationWindow>> {
     let mut windows = Vec::new();
 
-    for episode in episodes {
-        if episode.actions.len() < pred_horizon || episode.observations.len() < obs_horizon {
+    for (episode_index, episode) in episodes.iter().enumerate() {
+        if episode.states.len() < pred_horizon + 1 {
             continue;
         }
 
-        for start in 0..=(episode.actions.len() - pred_horizon) {
-            let obs_start = if start >= obs_horizon {
-                start + 1 - obs_horizon
-            } else {
-                0
-            };
-            if start + 1 + pred_horizon > episode.states.len() {
-                continue;
-            }
-            if obs_start + obs_horizon > episode.observations.len() {
-                continue;
-            }
-            let mut obs_history = episode.observations[obs_start..obs_start + obs_horizon].to_vec();
-            while obs_history.len() < obs_horizon {
-                obs_history.insert(0, obs_history[0].clone());
-            }
+        for start in 0..=(episode.states.len() - pred_horizon - 1) {
+            let obs_history =
+                build_obs_history(&episode.observations, start, obs_horizon, episode_index)?;
+            let current_state = episode.states.get(start).cloned().with_context(|| {
+                format!("episode {episode_index} current state missing for sample {start}")
+            })?;
+            let expert_actions =
+                take_window(&episode.actions, start, pred_horizon).with_context(|| {
+                    format!("episode {episode_index} action window is missing for sample {start}")
+                })?;
+            let target_states = take_window(&episode.states, start + 1, pred_horizon)
+                .with_context(|| {
+                    format!(
+                        "episode {episode_index} target state window is missing for sample {start}"
+                    )
+                })?;
 
             windows.push(EvaluationWindow {
                 obs_history,
-                current_state: episode.states[start].clone(),
-                expert_actions: episode.actions[start..start + pred_horizon].to_vec(),
-                target_states: episode.states[start + 1..start + 1 + pred_horizon].to_vec(),
+                current_state,
+                expert_actions,
+                target_states,
             });
         }
     }
 
-    windows
+    Ok(windows)
 }
 
-fn validate_episode_dimensions(
+fn validate_episodes_for_evaluation(
     episodes: &[Episode],
     policy_config: &PolicyConfig,
     world_model_config: &WorldModelConfig,
 ) -> Result<()> {
-    let Some(episode) = episodes.first() else {
+    if episodes.is_empty() {
         anyhow::bail!("dataset does not contain any episodes");
-    };
+    }
 
+    let mut usable_windows = 0usize;
+    for (episode_index, episode) in episodes.iter().enumerate() {
+        validate_episode(episode, episode_index, policy_config, world_model_config)?;
+        if episode.states.len() > policy_config.pred_horizon {
+            usable_windows += episode.states.len() - policy_config.pred_horizon;
+        }
+    }
+
+    if usable_windows == 0 {
+        anyhow::bail!("dataset does not contain any usable evaluation windows");
+    }
+
+    Ok(())
+}
+
+fn validate_episode(
+    episode: &Episode,
+    episode_index: usize,
+    policy_config: &PolicyConfig,
+    world_model_config: &WorldModelConfig,
+) -> Result<()> {
     let state_dim = episode
         .states
         .first()
         .map(|state| state.len())
-        .context("episode is missing state samples")?;
+        .with_context(|| format!("episode {episode_index} is missing state samples"))?;
     let action_dim = episode
         .actions
         .first()
         .map(|action| action.len())
-        .context("episode is missing action samples")?;
+        .with_context(|| format!("episode {episode_index} is missing action samples"))?;
     let obs_dim = episode
         .observations
         .first()
         .map(|obs| obs.len())
-        .context("episode is missing observation samples")?;
+        .with_context(|| format!("episode {episode_index} is missing observation samples"))?;
 
     if state_dim != world_model_config.state_dim {
         anyhow::bail!(
-            "state dimension mismatch: dataset={} checkpoint={}",
+            "episode {episode_index} state dimension mismatch: dataset={} checkpoint={}",
             state_dim,
             world_model_config.state_dim
         );
     }
     if action_dim != policy_config.action_dim || action_dim != world_model_config.action_dim {
         anyhow::bail!(
-            "action dimension mismatch: dataset={} policy={} world_model={}",
+            "episode {episode_index} action dimension mismatch: dataset={} policy={} world_model={}",
             action_dim,
             policy_config.action_dim,
             world_model_config.action_dim
@@ -586,13 +625,86 @@ fn validate_episode_dimensions(
     }
     if obs_dim != policy_config.obs_dim {
         anyhow::bail!(
-            "observation dimension mismatch: dataset={} checkpoint={}",
+            "episode {episode_index} observation dimension mismatch: dataset={} checkpoint={}",
             obs_dim,
             policy_config.obs_dim
         );
     }
+    if episode.states.len() != episode.observations.len() {
+        anyhow::bail!(
+            "episode {episode_index} must have the same number of states and observations"
+        );
+    }
+    if episode.states.len() != episode.actions.len() + 1 {
+        anyhow::bail!("episode {episode_index} must contain exactly one more state than action");
+    }
+
+    validate_sequence_shapes(&episode.states, state_dim, "state", episode_index)?;
+    validate_sequence_shapes(&episode.observations, obs_dim, "observation", episode_index)?;
+    validate_sequence_shapes(&episode.actions, action_dim, "action", episode_index)?;
 
     Ok(())
+}
+
+fn validate_sequence_shapes(
+    rows: &[Vec<f32>],
+    expected_dim: usize,
+    label: &str,
+    episode_index: usize,
+) -> Result<()> {
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.len() != expected_dim {
+            anyhow::bail!(
+                "episode {episode_index} {label} {row_index} has dimension {} but expected {}",
+                row.len(),
+                expected_dim
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn build_obs_history(
+    observations: &[Vec<f32>],
+    start: usize,
+    obs_horizon: usize,
+    episode_index: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if observations.is_empty() {
+        anyhow::bail!("episode {episode_index} is missing observations");
+    }
+
+    let obs_start = if start >= obs_horizon {
+        start + 1 - obs_horizon
+    } else {
+        0
+    };
+    let obs_end = obs_start
+        .checked_add(obs_horizon)
+        .context("observation window overflowed")?;
+
+    let mut obs_history = observations
+        .get(obs_start..obs_end.min(observations.len()))
+        .map(|window| window.to_vec())
+        .with_context(|| {
+            format!("episode {episode_index} observation window is missing for sample {start}")
+        })?;
+
+    while obs_history.len() < obs_horizon {
+        obs_history.insert(0, obs_history[0].clone());
+    }
+
+    Ok(obs_history)
+}
+
+fn take_window(rows: &[Vec<f32>], start: usize, len: usize) -> Result<Vec<Vec<f32>>> {
+    let end = start
+        .checked_add(len)
+        .context("evaluation window overflowed")?;
+    rows.get(start..end)
+        .map(|window| window.to_vec())
+        .context("evaluation window is out of bounds")
 }
 
 fn resolved_policy_checkpoint_path(args: &EvalArgs) -> PathBuf {
@@ -631,27 +743,48 @@ fn log_eval_report(report: &EvaluationReport) {
     tracing::info!("  success rate: {:.2}%", report.success_rate * 100.0);
     tracing::info!("  num candidates: {}", report.num_candidates);
     tracing::info!("  opt steps: {}", report.opt_steps);
+    tracing::info!("  opt learning rate: {:.6}", report.opt_learning_rate);
 }
 
 fn tensor_1d<B: Backend>(values: &[f32], device: &B::Device) -> Tensor<B, 1> {
     Tensor::<B, 1>::from_floats(values, device)
 }
 
-fn tensor_2d<B: Backend>(values: &[f32], device: &B::Device) -> Tensor<B, 2> {
-    Tensor::<B, 1>::from_floats(values, device).reshape([1, values.len()])
+fn tensor_2d<B: Backend>(values: &[f32], device: &B::Device) -> Result<Tensor<B, 2>> {
+    if values.is_empty() {
+        anyhow::bail!("cannot build tensor from an empty row");
+    }
+
+    Ok(Tensor::<B, 1>::from_floats(values, device).reshape([1, values.len()]))
 }
 
-fn tensor_3d<B: Backend>(values: &[Vec<f32>], device: &B::Device) -> Tensor<B, 3> {
+fn tensor_3d<B: Backend>(values: &[Vec<f32>], device: &B::Device) -> Result<Tensor<B, 3>> {
+    if values.is_empty() {
+        anyhow::bail!("cannot build tensor from an empty sequence");
+    }
+
     let outer = values.len();
     let inner = values
         .first()
         .map(|row| row.len())
-        .expect("evaluation windows are non-empty");
+        .context("cannot build tensor from an empty row")?;
+    if inner == 0 {
+        anyhow::bail!("cannot build tensor from zero-width rows");
+    }
+    for (row_index, row) in values.iter().enumerate() {
+        if row.len() != inner {
+            anyhow::bail!(
+                "tensor row {row_index} has dimension {} but expected {}",
+                row.len(),
+                inner
+            );
+        }
+    }
     let flat = values
         .iter()
         .flat_map(|row| row.iter().copied())
         .collect::<Vec<_>>();
-    Tensor::<B, 1>::from_floats(flat.as_slice(), device).reshape([1, outer, inner])
+    Ok(Tensor::<B, 1>::from_floats(flat.as_slice(), device).reshape([1, outer, inner]))
 }
 
 fn tensor_to_vec<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Result<Vec<f32>> {
@@ -692,13 +825,6 @@ fn terminal_l2_distance(
         .sqrt()
 }
 
-fn current_seed() -> u64 {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs() ^ u64::from(duration.subsec_nanos()),
-        Err(_) => 42,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,16 +833,24 @@ mod tests {
     };
     use gpc_core::config::TrainingConfig;
     use gpc_train::{PolicyTrainer, WorldModelTrainer};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_eval_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "gpc_eval_{name}_{}_{}",
             std::process::id(),
-            current_seed()
+            test_suffix()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn test_suffix() -> u64 {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs() ^ u64::from(duration.subsec_nanos()),
+            Err(_) => 42,
+        }
     }
 
     fn current_timestamp() -> String {
@@ -845,6 +979,8 @@ mod tests {
             episode_length: 10,
             num_candidates: Some(4),
             opt_steps: Some(2),
+            opt_learning_rate: None,
+            seed: Some(42),
             demo: false,
         };
         let config = GpcConfig::default();
@@ -860,6 +996,7 @@ mod tests {
         assert!(report.success_rate >= 0.0 && report.success_rate <= 1.0);
         assert_eq!(report.num_candidates, 4);
         assert_eq!(report.opt_steps, 2);
+        assert!((report.opt_learning_rate - config.gpc_opt.opt_learning_rate as f32).abs() < 1e-6);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -867,12 +1004,77 @@ mod tests {
     #[test]
     fn synthetic_windows_match_checkpoint_dims() {
         let episodes = generate_synthetic_episodes(4, 2, 4, 8, 2, 42);
-        let windows = build_windows(&episodes, 2, 4);
+        let windows = build_windows(&episodes, 2, 4).unwrap();
 
         assert!(!windows.is_empty());
         assert_eq!(windows[0].obs_history.len(), 2);
         assert_eq!(windows[0].current_state.len(), 4);
         assert_eq!(windows[0].expert_actions.len(), 4);
         assert_eq!(windows[0].target_states.len(), 4);
+    }
+
+    #[test]
+    fn opt_path_honors_learning_rate_override() {
+        let dir = temp_eval_dir("opt_lr");
+        let (policy_path, world_model_path, _, _) = save_tiny_checkpoints(&dir).unwrap();
+
+        let args = EvalArgs {
+            strategy: "opt".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: true,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: Some(1),
+            opt_steps: Some(1),
+            opt_learning_rate: Some(0.123),
+            seed: Some(42),
+            demo: false,
+        };
+
+        let config = GpcConfig::default();
+        let report = run_checkpoint_eval(&args, &config).unwrap();
+
+        assert_eq!(report.strategy, EvaluationStrategy::Opt);
+        assert_eq!(report.opt_steps, 1);
+        assert!((report.opt_learning_rate - 0.123).abs() < 1e-6);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_dataset_is_rejected() {
+        let policy_config = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            action_horizon: 1,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            noise_schedule: gpc_core::config::NoiseScheduleConfig::default(),
+        };
+        let world_model_config = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            dropout: 0.0,
+        };
+        let malformed = vec![Episode {
+            states: vec![vec![0.0; 4], vec![0.0; 4]],
+            actions: vec![vec![0.0; 2], vec![0.0; 2]],
+            observations: vec![vec![0.0; 4]],
+        }];
+
+        let err = validate_episodes_for_evaluation(&malformed, &policy_config, &world_model_config)
+            .expect_err("malformed dataset should be rejected");
+        assert!(
+            err.to_string()
+                .contains("same number of states and observations")
+        );
     }
 }
