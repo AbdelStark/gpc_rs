@@ -213,3 +213,53 @@ Available skills:
   — Tract is for inference only — use Burn for training.
 </lessons_learned>
 </memory>
+
+## Design Context
+
+### Users
+Researchers, ML engineers, and robotics practitioners evaluating the GPC framework.
+They arrive from the paper, GitHub, or a conference talk. They want to see the system
+*think* — observe how a diffusion policy proposes trajectories, how the world model
+scores them, and how the closed-loop replanning unfolds. The demo is proof that the
+Rust implementation works, not a toy.
+
+### Brand Personality
+**Elegant. Precise. Restrained.**
+The tone is that of a premium research publication — confident in the work,
+letting the data and visualizations carry the weight. No hype, no flash.
+Authority comes from clarity and craft, not volume.
+
+### Aesthetic Direction
+- **Theme**: Dark mode. A dark canvas makes trajectories, glowing paths, and
+  data visualizations the focal point. Surfaces are subtle, not competing.
+- **Reference**: Apple Machine Learning Research, Distill.pub — beautiful data
+  visualization, generous whitespace (darkspace), interactive explanations,
+  premium typographic refinement.
+- **Typography**: Display type (Syne) for bold structural headings.
+  Instrument Sans for body/data. Monospace for numeric readouts.
+  Generous letter-spacing on labels, tight tracking on headlines.
+- **Color**: Monochromatic dark base with a curated accent palette.
+  Orange (primary accent for the arm/policy), teal/lime for world model paths,
+  blue for optimization. Color is information, never decoration.
+- **Motion**: Purposeful and physics-based. Trajectory replays, smooth frame
+  transitions, subtle state changes. Never gratuitous.
+- **Surfaces**: Subtle glass/frosted borders on panels. Minimal elevation
+  hierarchy. Fine 1px borders with low-opacity strokes, not heavy shadows.
+
+### Design Principles
+1. **Data is the hero** — Every pixel of UI exists to frame the robotics content.
+   Charts, trajectories, arm poses, and numeric readouts are first-class visual elements.
+2. **Earned confidence** — No badges, no "powered by" labels, no explanatory filler.
+   The quality of the visualization speaks for itself.
+3. **Purposeful restraint** — On a dark canvas, what you *don't* show matters as much
+   as what you do. Darkspace gives elements room to breathe and creates focus.
+4. **Tangible intelligence** — The demo should feel like watching a real system reason
+   in real time, not a pre-rendered animation. Live data, live numbers, live replanning.
+5. **Instrument-grade craft** — Borders, radii, type scales, and spacing should feel
+   machined. Every detail is intentional. Think precision instrument, not web template.
+
+### Anti-References (explicitly avoid)
+- Generic SaaS dashboards (bland card grids, default chart libraries)
+- Dry academic layouts (sparse HTML, no visual craft)
+- Over-animated/gimmicky effects (3D, parallax, confetti)
+- Cookie-cutter AI landing pages (gradient blobs, purple-dark, "AI-powered" badges)

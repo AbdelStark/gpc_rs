@@ -19,14 +19,10 @@ import type {
   RuntimeSnapshot,
 } from './types'
 
-function formatCompact(value: number) {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(value)
-}
-
 function App() {
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null)
   const [playback, setPlayback] = useState<MissionPlayback | null>(null)
-  const [statusMessage, setStatusMessage] = useState('Waiting for the Rust planner server…')
+  const [statusMessage, setStatusMessage] = useState('Connecting to planner…')
   const [error, setError] = useState<string | null>(null)
   const [missionId, setMissionId] = useState('')
   const [mode, setMode] = useState<PlannerMode>('rank')
@@ -37,50 +33,41 @@ function App() {
 
   const deferredCandidates = useDeferredValue(candidateCount)
 
-  // Poll for server readiness, then fetch the snapshot
   useEffect(() => {
     let cancelled = false
 
     async function boot() {
-      setStatusMessage('Connecting to the Rust planner server…')
-
-      // Poll until the server is up
       while (!cancelled) {
         if (await healthCheck()) break
         await new Promise((resolve) => setTimeout(resolve, 800))
       }
       if (cancelled) return
 
-      setStatusMessage('Server online. Fetching engine snapshot…')
+      setStatusMessage('Fetching engine snapshot…')
 
       try {
         const snap = await fetchSnapshot()
         if (cancelled) return
         setSnapshot(snap)
         setCandidateCount(snap.overview.recommended_candidates)
-        setMissionId((currentId) => currentId || snap.missions[0]?.id || '')
-        setStatusMessage('Planner warm. Rolling out a cinematic mission trace.')
+        setMissionId((id) => id || snap.missions[0]?.id || '')
+        setStatusMessage('')
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to fetch snapshot')
-          setStatusMessage('Could not connect to the planner server.')
         }
       }
     }
 
     boot()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [])
 
-  // Simulate whenever mission/mode/candidates change
   useEffect(() => {
     if (!snapshot || !missionId) return
 
     let cancelled = false
     setSimulating(true)
-    setStatusMessage('Sampling candidates and ranking them in the world model…')
 
     fetchSimulation(missionId, mode, deferredCandidates)
       .then((result) => {
@@ -88,7 +75,7 @@ function App() {
         startTransition(() => {
           setPlayback(result)
           setFrameIndex(0)
-          setStatusMessage('Mission trace ready. Scrub or autoplay the closed-loop plan.')
+          setStatusMessage('')
         })
       })
       .catch((err) => {
@@ -100,104 +87,79 @@ function App() {
         if (!cancelled) setSimulating(false)
       })
 
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [snapshot, missionId, mode, deferredCandidates])
 
   const tickFrame = useEffectEvent(() => {
     setFrameIndex((current) => {
       const total = playback?.frames.length ?? 0
-      if (total === 0) {
-        return current
-      }
-
-      return (current + 1) % total
+      return total === 0 ? current : (current + 1) % total
     })
   })
 
   useEffect(() => {
-    if (!autoplay || !playback?.frames.length) {
-      return
-    }
-
-    const timer = window.setInterval(() => tickFrame(), 1450)
+    if (!autoplay || !playback?.frames.length) return
+    const timer = window.setInterval(() => tickFrame(), 1400)
     return () => window.clearInterval(timer)
   }, [autoplay, playback?.frames.length])
 
   const currentMission = useMemo<MissionSpec | null>(() => {
-    if (!snapshot) {
-      return null
-    }
-
-    return snapshot.missions.find((mission) => mission.id === missionId) ?? snapshot.missions[0]
+    if (!snapshot) return null
+    return snapshot.missions.find((m) => m.id === missionId) ?? snapshot.missions[0]
   }, [missionId, snapshot])
 
   const frames = playback?.frames ?? []
   const currentFrame: PlanningFrame | null =
     frames[Math.min(frameIndex, Math.max(frames.length - 1, 0))] ?? null
-
   const stageReady = Boolean(currentMission && currentFrame && playback)
 
   return (
     <main className="app-shell">
-      <section className="hero-panel">
-        <div className="hero-panel__copy">
-          <p className="eyebrow">robotics demo</p>
-          <h1>Rust world models steering a robot arm from a local planner server.</h1>
-          <p className="lede">
-            This demo runs the project&apos;s policy, world-model, training, and evaluation crates
-            natively on your machine, then streams plans to the browser like a compact physical-AI
-            control room.
-          </p>
-          <div className="hero-panel__tags">
-            <span>gpc-policy</span>
-            <span>gpc-world</span>
-            <span>gpc-eval</span>
-            <span>gpc-train</span>
-            <span>native server</span>
-          </div>
+      {/* ── top bar ──────────────────────────────── */}
+      <header className="top-bar">
+        <div className="top-bar__brand">
+          <h1>GPC</h1>
+          <span>Generative Policy Control</span>
         </div>
-
-        <div className="hero-panel__proof">
-          <p>{statusMessage}</p>
-          {simulating ? <p className="simulating-hint">simulating…</p> : null}
-          {snapshot ? (
-            <dl>
-              <div>
-                <dt>dataset windows</dt>
-                <dd>{formatCompact(snapshot.overview.dataset_transitions)}</dd>
-              </div>
-              <div>
-                <dt>bootstrap</dt>
-                <dd>{snapshot.overview.bootstrap_ms} ms</dd>
-              </div>
-              <div>
-                <dt>planner horizon</dt>
-                <dd>{snapshot.overview.pred_horizon} steps</dd>
-              </div>
-            </dl>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="demo-grid">
-        {stageReady && currentMission && currentFrame ? (
-          <RobotStage frame={currentFrame} mission={currentMission} mode={mode} />
-        ) : (
-          <section className="robot-stage robot-stage--loading">
-            <div className="robot-stage__loading">
-              <span className="robot-stage__pulse" />
-              <p>{statusMessage}</p>
+        {snapshot ? (
+          <div className="top-bar__stats">
+            <div className="top-bar__stat">
+              <span className="label">bootstrap</span>
+              <span className="mono">{snapshot.overview.bootstrap_ms}ms</span>
             </div>
-          </section>
-        )}
+            <div className="top-bar__stat">
+              <span className="label">transitions</span>
+              <span className="mono">{snapshot.overview.dataset_transitions}</span>
+            </div>
+            <div className="top-bar__stat">
+              <span className="label">horizon</span>
+              <span className="mono">{snapshot.overview.pred_horizon}</span>
+            </div>
+          </div>
+        ) : null}
+      </header>
+
+      {/* ── main demo grid ───────────────────────── */}
+      <div className="demo-layout">
+        <div className="demo-layout__stage">
+          {stageReady && currentMission && currentFrame ? (
+            <RobotStage frame={currentFrame} mission={currentMission} mode={mode} />
+          ) : (
+            <section className="robot-stage--loading">
+              <div className="robot-stage__loading">
+                <span className="robot-stage__pulse" />
+                <p>{statusMessage || 'Preparing simulation…'}</p>
+              </div>
+            </section>
+          )}
+        </div>
 
         <aside className="control-rail">
-          <section className="control-card control-card--selector">
+          {/* missions */}
+          <section className="control-card">
             <div className="control-card__header">
-              <p>Mission presets</p>
-              <strong>{currentMission?.title ?? 'Loading'}</strong>
+              <p>Mission</p>
+              <strong>{currentMission?.title ?? '…'}</strong>
             </div>
             <div className="mission-list">
               {snapshot?.missions.map((mission) => (
@@ -216,10 +178,11 @@ function App() {
             </div>
           </section>
 
+          {/* planner mode */}
           <section className="control-card">
             <div className="control-card__header">
-              <p>Planner mode</p>
-              <strong>{mode === 'rank' ? 'World-model rank' : 'GPC-OPT refine'}</strong>
+              <p>Planner</p>
+              <strong>{mode === 'rank' ? 'Rank' : 'Optimize'}</strong>
             </div>
             <div className="mode-toggle" role="tablist" aria-label="Planner mode">
               <button
@@ -238,12 +201,12 @@ function App() {
               </button>
             </div>
             <label className="slider-field">
-              <span>candidate rollouts</span>
+              <span>candidates</span>
               <strong>{deferredCandidates}</strong>
               <input
                 max={28}
                 min={8}
-                onChange={(event) => setCandidateCount(Number(event.target.value))}
+                onChange={(e) => setCandidateCount(Number(e.target.value))}
                 step={1}
                 type="range"
                 value={candidateCount}
@@ -251,76 +214,78 @@ function App() {
             </label>
           </section>
 
-          <section className="control-card control-card--timeline">
+          {/* playback */}
+          <section className="control-card">
             <div className="control-card__header">
               <p>Playback</p>
-              <strong>
-                frame {currentFrame ? frameIndex + 1 : 0}/{playback?.frames.length ?? 0}
+              <strong className="mono">
+                {currentFrame ? frameIndex + 1 : 0}/{frames.length}
               </strong>
             </div>
             <div className="timeline-actions">
-              <button onClick={() => setAutoplay((value) => !value)} type="button">
-                {autoplay ? 'Pause autoplay' : 'Resume autoplay'}
+              <button onClick={() => setAutoplay((v) => !v)} type="button">
+                {autoplay ? 'Pause' : 'Play'}
               </button>
             </div>
             <input
               className="timeline-slider"
-              max={Math.max((playback?.frames.length ?? 1) - 1, 0)}
+              max={Math.max(frames.length - 1, 0)}
               min={0}
-              onChange={(event) => {
+              onChange={(e) => {
                 setAutoplay(false)
-                setFrameIndex(Number(event.target.value))
+                setFrameIndex(Number(e.target.value))
               }}
               type="range"
-              value={Math.min(frameIndex, Math.max((playback?.frames.length ?? 1) - 1, 0))}
+              value={Math.min(frameIndex, Math.max(frames.length - 1, 0))}
             />
             {currentFrame ? (
               <div className="stat-inline">
                 <div>
-                  <span>reward spread</span>
-                  <strong>{currentFrame.reward_spread.toFixed(3)}</strong>
+                  <span>spread</span>
+                  <strong className="mono">{currentFrame.reward_spread.toFixed(3)}</strong>
                 </div>
                 <div>
-                  <span>best reward</span>
-                  <strong>{currentFrame.reward_best.toFixed(3)}</strong>
+                  <span>best</span>
+                  <strong className="mono">{currentFrame.reward_best.toFixed(3)}</strong>
                 </div>
               </div>
             ) : null}
           </section>
 
-          <section className="control-card control-card--ranking">
+          {/* top candidates */}
+          <section className="control-card">
             <div className="control-card__header">
               <p>Top trajectories</p>
-              <strong>{currentFrame?.candidates.length ?? 0} visible</strong>
+              <strong>{currentFrame?.candidates.length ?? 0}</strong>
             </div>
             <div className="ranking-list">
-              {currentFrame?.candidates.map((candidate) => (
-                <article className="ranking-row" key={candidate.rank}>
+              {currentFrame?.candidates.map((c) => (
+                <article className="ranking-row" key={c.rank}>
                   <div>
-                    <p>#{candidate.rank}</p>
-                    <strong>{candidate.reward.toFixed(3)}</strong>
+                    <p>#{c.rank}</p>
+                    <strong className="mono">{c.reward.toFixed(3)}</strong>
                   </div>
                   <div>
-                    <span>clearance {candidate.clearance.toFixed(3)}</span>
-                    <span>terminal {candidate.terminal_distance.toFixed(3)}</span>
+                    <span>{c.clearance.toFixed(3)}</span>
+                    <span>{c.terminal_distance.toFixed(3)}</span>
                   </div>
                 </article>
               ))}
             </div>
           </section>
         </aside>
-      </section>
+      </div>
 
+      {/* ── evidence section ─────────────────────── */}
       {snapshot ? (
-        <section className="evidence-grid">
-          <section className="evidence-copy">
-            <p className="eyebrow">why this lands</p>
-            <h2>The browser sees the same structure the paper argues for.</h2>
+        <section className="evidence-section">
+          <div className="evidence-copy">
+            <p className="eyebrow">architecture</p>
+            <h2>The browser sees the same closed-loop the paper describes.</h2>
             <p>
-              The diffusion policy proposes joint-space futures. The learned world model rolls them
-              forward. The evaluator scores safety and progress. The chosen path only executes a
-              short prefix before re-planning, so the demo behaves like a compact model-predictive
-              robotics loop instead of a canned animation.
+              A diffusion policy proposes joint-space futures. A learned world model
+              rolls each one forward. The evaluator scores safety and progress, then
+              the best prefix executes before the whole cycle repeats.
             </p>
             <dl className="evidence-stats">
               <div>
@@ -340,9 +305,9 @@ function App() {
                 <dd>{snapshot.overview.dataset_episodes}</dd>
               </div>
             </dl>
-          </section>
+          </div>
 
-          <section className="evidence-signals">
+          <div className="evidence-signals">
             <SignalChart
               accent="world"
               points={snapshot.overview.world_loss_curve}
@@ -353,31 +318,33 @@ function App() {
               points={snapshot.overview.policy_loss_curve}
               title="diffusion-policy loss"
             />
-          </section>
+          </div>
         </section>
       ) : null}
 
+      {/* ── summary strip ────────────────────────── */}
       {playback ? (
         <section className="summary-strip">
           <article>
-            <p>mission outcome</p>
-            <strong>{playback.summary.success ? 'goal secured' : 'replan limit reached'}</strong>
+            <p>outcome</p>
+            <strong>{playback.summary.success ? 'goal reached' : 'replan limit'}</strong>
           </article>
           <article>
             <p>final distance</p>
-            <strong>{playback.summary.final_goal_distance.toFixed(3)}</strong>
+            <strong className="mono">{playback.summary.final_goal_distance.toFixed(3)}</strong>
           </article>
           <article>
-            <p>minimum clearance</p>
-            <strong>{playback.summary.min_clearance.toFixed(3)}</strong>
+            <p>min clearance</p>
+            <strong className="mono">{playback.summary.min_clearance.toFixed(3)}</strong>
           </article>
           <article>
-            <p>mean forecast error</p>
-            <strong>{playback.summary.average_world_error.toFixed(3)}</strong>
+            <p>forecast error</p>
+            <strong className="mono">{playback.summary.average_world_error.toFixed(3)}</strong>
           </article>
         </section>
       ) : null}
 
+      {simulating ? <p className="simulating-hint">simulating…</p> : null}
       {error ? <section className="error-banner">{error}</section> : null}
     </main>
   )
