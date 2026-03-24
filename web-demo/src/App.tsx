@@ -280,12 +280,13 @@ function App() {
       {snapshot ? (
         <section className="evidence-section">
           <div className="evidence-copy">
-            <p className="eyebrow">architecture</p>
-            <h2>The browser sees the same closed-loop the paper describes.</h2>
+            <p className="eyebrow">closed-loop architecture</p>
+            <h2>Plan far, execute short, replan from reality.</h2>
             <p>
-              A diffusion policy proposes joint-space futures. A learned world model
-              rolls each one forward. The evaluator scores safety and progress, then
-              the best prefix executes before the whole cycle repeats.
+              The diffusion policy samples diverse candidate trajectories. The world model
+              imagines each one forward. The evaluator scores progress and safety. Only the
+              first action of the winning trajectory executes — then the entire cycle repeats
+              from the actual state, not the predicted one.
             </p>
             <dl className="evidence-stats">
               <div>
@@ -297,12 +298,20 @@ function App() {
                 <dd>{snapshot.overview.action_dim}</dd>
               </div>
               <div>
-                <dt>obs history</dt>
+                <dt>obs horizon</dt>
                 <dd>{snapshot.overview.obs_horizon}</dd>
+              </div>
+              <div>
+                <dt>pred horizon</dt>
+                <dd>{snapshot.overview.pred_horizon}</dd>
               </div>
               <div>
                 <dt>episodes</dt>
                 <dd>{snapshot.overview.dataset_episodes}</dd>
+              </div>
+              <div>
+                <dt>transitions</dt>
+                <dd>{snapshot.overview.dataset_transitions}</dd>
               </div>
             </dl>
           </div>

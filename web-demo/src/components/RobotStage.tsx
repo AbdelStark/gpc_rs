@@ -34,10 +34,12 @@ export function RobotStage({ mission, frame, mode }: RobotStageProps) {
             step {frame.step + 1}/{mission.max_steps}
           </strong>
         </div>
-        <div className="robot-stage__chips">
-          <span className={`robot-stage__chip ${mode === 'rank' ? '' : 'is-active'}`}>opt</span>
-          <span className={`robot-stage__chip ${mode === 'rank' ? 'is-active' : ''}`}>rank</span>
-          <span className="robot-stage__chip is-active">policy</span>
+        <div className="robot-stage__legend">
+          <span className="robot-stage__legend-item" data-color="executed">executed</span>
+          <span className="robot-stage__legend-item" data-color="ranked">ranked</span>
+          <span className="robot-stage__legend-item" data-color="optimized">optimized</span>
+          <span className="robot-stage__legend-item" data-color="policy">policy</span>
+          <span className="robot-stage__legend-item" data-color="candidates">candidates</span>
         </div>
       </div>
 

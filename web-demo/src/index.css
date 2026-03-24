@@ -185,27 +185,52 @@ button { cursor: pointer; }
   letter-spacing: -0.02em;
 }
 
-.robot-stage__chips {
+.robot-stage__legend {
   display: flex;
-  gap: 0.35rem;
+  gap: 0.85rem;
+  align-items: center;
 }
 
-.robot-stage__chip {
-  padding: 0.22rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.65rem;
+.robot-stage__legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6rem;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  border: 1px solid var(--line);
-  color: var(--t2);
-  background: transparent;
+  color: var(--t3);
 }
 
-.robot-stage__chip.is-active {
-  border-color: color-mix(in oklab, var(--mission-accent, var(--orange)) 50%, var(--line));
-  color: var(--t1);
-  background: color-mix(in oklab, var(--mission-accent, var(--orange)) 12%, transparent);
+.robot-stage__legend-item::before {
+  content: '';
+  width: 1rem;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.robot-stage__legend-item[data-color="executed"]::before {
+  background: var(--t1);
+  height: 2.5px;
+}
+
+.robot-stage__legend-item[data-color="ranked"]::before {
+  background: var(--lime);
+}
+
+.robot-stage__legend-item[data-color="optimized"]::before {
+  background: var(--blue);
+  border-style: dashed;
+}
+
+.robot-stage__legend-item[data-color="policy"]::before {
+  background: var(--orange-muted);
+  opacity: 0.7;
+}
+
+.robot-stage__legend-item[data-color="candidates"]::before {
+  background: var(--orange);
+  opacity: 0.25;
 }
 
 /* svg canvas */
@@ -707,7 +732,7 @@ input[type="range"]::-moz-range-thumb {
 
 .evidence-stats {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 0.4rem;
   margin: 0;
 }

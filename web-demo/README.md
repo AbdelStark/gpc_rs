@@ -1,73 +1,69 @@
-# React + TypeScript + Vite
+# GPC Web Demo
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interactive browser-based visualization of the GPC (Generative Policy Control) pipeline. A 2-link robot arm navigates around obstacles using a diffusion policy, a learned world model, and closed-loop replanning.
 
-Currently, two official plugins are available:
+## Architecture
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+┌──────────────────┐         ┌─────────────────┐
+│  gpc-demo-server │  REST   │   React + Vite  │
+│  (native Rust)   │ ──────→ │   (browser)     │
+│                  │  :3100  │                  │  :5174
+│  trains models   │         │  visualizes      │
+│  serves API      │         │  planning frames │
+└──────────────────┘         └─────────────────┘
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The server trains a diffusion policy and world model from synthetic expert demonstrations on startup (~1 second in release mode), then serves two endpoints:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- `GET /api/snapshot` — runtime overview, training loss curves, mission presets
+- `POST /api/simulate` — runs closed-loop replanning for a mission, returns all planning frames
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+The frontend polls for server readiness, fetches the snapshot, then triggers simulations. Vite proxies `/api` requests to the server.
+
+## Running
+
+```bash
+# Terminal 1 — planner server
+cd .. && cargo run --release -p gpc-demo-server
+
+# Terminal 2 — frontend
+npm install
+npm run dev
+
+# Open http://localhost:5174
 ```
+
+## What It Shows
+
+The demo visualizes the complete GPC inference loop at each planning step:
+
+| Visual | What it represents |
+|--------|--------------------|
+| Faint ghost paths | K candidate trajectories from the diffusion policy, rolled through the world model |
+| Orange dashed path | Raw policy sample (no evaluation) |
+| Green path | GPC-RANK winner (highest-scoring candidate) |
+| Blue dashed path | GPC-OPT result (gradient-refined trajectory) |
+| Glowing path | Active strategy's selected trajectory |
+| White trail | Executed path (composite of first-actions from each replan cycle) |
+| Circular obstacles | Hazard zones penalized by the reward function |
+| Crosshair | Goal target |
+
+The control panel lets you switch between GPC-RANK and GPC-OPT, adjust the number of candidate rollouts (K), scrub through planning frames, and select different missions.
+
+See [docs/demo-explained.md](../docs/demo-explained.md) for the full explanation.
+
+## Stack
+
+- **Server:** Rust, axum, Burn (NdArray backend), tokio
+- **Frontend:** React 19, TypeScript, Vite, pure CSS (no UI library)
+- **Typography:** Syne (headings), Instrument Sans (body), JetBrains Mono (data)
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start Vite dev server with API proxy to :3100 |
+| `npm run build` | Production build |
+| `npm run lint` | ESLint |
+| `npm run preview` | Preview production build |
