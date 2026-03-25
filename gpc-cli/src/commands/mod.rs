@@ -1,5 +1,6 @@
 //! CLI command implementations.
 
+mod benchmark;
 mod checkpoint;
 mod demo;
 mod demo_pipeline;
@@ -8,6 +9,7 @@ mod eval;
 mod init_config;
 mod train;
 
+pub use benchmark::{BenchmarkArgs, run_benchmark};
 pub use checkpoint::{CheckpointArgs, run_checkpoint};
 pub use demo::{DemoArgs, run_demo};
 pub use eval::{EvalArgs, run_eval};

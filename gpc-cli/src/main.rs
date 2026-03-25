@@ -14,6 +14,8 @@ enum Cli {
     Train(commands::TrainArgs),
     /// Evaluate trajectories using GPC-RANK or GPC-OPT.
     Eval(commands::EvalArgs),
+    /// Benchmark checkpoints across policy, GPC-RANK, and GPC-OPT.
+    Benchmark(commands::BenchmarkArgs),
     /// Inspect or convert model checkpoints.
     Checkpoint(commands::CheckpointArgs),
     /// Generate a default configuration file.
@@ -33,6 +35,7 @@ fn main() -> Result<()> {
     match cli {
         Cli::Train(args) => commands::run_train(args),
         Cli::Eval(args) => commands::run_eval(args),
+        Cli::Benchmark(args) => commands::run_benchmark(args),
         Cli::Checkpoint(args) => commands::run_checkpoint(args),
         Cli::InitConfig(args) => commands::run_init_config(args),
         Cli::Demo(args) => commands::run_demo(args),

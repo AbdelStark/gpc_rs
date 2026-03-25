@@ -14,92 +14,96 @@ use gpc_compat::{
     CheckpointKind, load_metadata, load_policy_checkpoint, load_world_model_checkpoint,
 };
 use gpc_core::config::{GpcConfig, PolicyConfig, WorldModelConfig};
-use gpc_core::traits::{Evaluator, RewardFunction, WorldModel};
-use gpc_eval::{GpcOptBuilder, GpcRankBuilder};
+use gpc_core::traits::{Evaluator, Policy, RewardFunction, WorldModel};
+use gpc_eval::{AutodiffGpcOptBuilder, GpcRankBuilder};
 use gpc_policy::DiffusionPolicyConfig;
 use gpc_train::data::Episode;
 use gpc_world::reward::L2RewardFunctionConfig;
 use gpc_world::world_model::StateWorldModelConfig;
 
-type EvalBackend = Autodiff<NdArray>;
+pub(crate) type EvalBackend = Autodiff<NdArray>;
 
 /// Arguments for the eval command.
 #[derive(Args, Debug, Clone)]
 pub struct EvalArgs {
-    /// Evaluation strategy: "rank" or "opt".
+    /// Evaluation strategy: "policy", "rank", or "opt".
     #[arg(long, default_value = "rank")]
-    strategy: String,
+    pub(crate) strategy: String,
 
     /// Path to configuration file (JSON).
     #[arg(short, long)]
-    config: Option<String>,
+    pub(crate) config: Option<String>,
 
     /// Path to the checkpoint directory.
     #[arg(long, default_value = "checkpoints")]
-    checkpoint_dir: String,
+    pub(crate) checkpoint_dir: String,
 
     /// Explicit path to a policy checkpoint.
     #[arg(long)]
-    policy_checkpoint: Option<String>,
+    pub(crate) policy_checkpoint: Option<String>,
 
     /// Explicit path to a world model checkpoint.
     #[arg(long)]
-    world_model_checkpoint: Option<String>,
+    pub(crate) world_model_checkpoint: Option<String>,
 
     /// Path to training data directory or episodes.json.
     #[arg(long)]
-    data: Option<String>,
+    pub(crate) data: Option<String>,
 
     /// Force synthetic evaluation data even when `--data` is set.
     #[arg(long)]
-    synthetic: bool,
+    pub(crate) synthetic: bool,
 
     /// Number of synthetic episodes to generate.
     #[arg(long, default_value = "12")]
-    episodes: usize,
+    pub(crate) episodes: usize,
 
     /// Number of timesteps per synthetic episode.
     #[arg(long, default_value = "36")]
-    episode_length: usize,
+    pub(crate) episode_length: usize,
 
     /// Number of candidate trajectories (GPC-RANK).
     #[arg(long)]
-    num_candidates: Option<usize>,
+    pub(crate) num_candidates: Option<usize>,
 
     /// Number of optimization steps (GPC-OPT).
     #[arg(long)]
-    opt_steps: Option<usize>,
+    pub(crate) opt_steps: Option<usize>,
 
     /// Override the GPC-OPT learning rate.
     #[arg(long)]
-    opt_learning_rate: Option<f32>,
+    pub(crate) opt_learning_rate: Option<f32>,
 
     /// Seed used for synthetic evaluation data.
     #[arg(long)]
-    seed: Option<u64>,
+    pub(crate) seed: Option<u64>,
 
     /// Run a demo evaluation with random models.
     #[arg(long)]
-    demo: bool,
+    pub(crate) demo: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EvaluationStrategy {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EvaluationStrategy {
+    Policy,
     Rank,
     Opt,
 }
 
 impl EvaluationStrategy {
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
+            "policy" => Ok(Self::Policy),
             "rank" => Ok(Self::Rank),
             "opt" => Ok(Self::Opt),
-            other => anyhow::bail!("Unknown strategy: {other}. Use 'rank' or 'opt'."),
+            other => anyhow::bail!("Unknown strategy: {other}. Use 'policy', 'rank', or 'opt'."),
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Policy => "policy",
             Self::Rank => "rank",
             Self::Opt => "opt",
         }
@@ -107,11 +111,11 @@ impl EvaluationStrategy {
 }
 
 #[derive(Debug, Clone)]
-struct LoadedModels<B: Backend> {
-    policy: gpc_policy::DiffusionPolicy<B>,
-    world_model: gpc_world::StateWorldModel<B>,
-    policy_config: PolicyConfig,
-    world_model_config: WorldModelConfig,
+pub(crate) struct LoadedModels<B: Backend> {
+    pub(crate) policy: gpc_policy::DiffusionPolicy<B>,
+    pub(crate) world_model: gpc_world::StateWorldModel<B>,
+    pub(crate) policy_config: PolicyConfig,
+    pub(crate) world_model_config: WorldModelConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -122,23 +126,24 @@ struct EvaluationWindow {
     target_states: Vec<Vec<f32>>,
 }
 
-#[derive(Debug, Clone)]
-struct EvaluationReport {
-    strategy: EvaluationStrategy,
-    mode: EvaluationMode,
-    windows_evaluated: usize,
-    mean_rollout_mse: f32,
-    mean_terminal_distance: f32,
-    mean_action_mse: f32,
-    mean_reward: f32,
-    success_rate: f32,
-    num_candidates: usize,
-    opt_steps: usize,
-    opt_learning_rate: f32,
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct EvaluationReport {
+    pub(crate) strategy: EvaluationStrategy,
+    pub(crate) mode: EvaluationMode,
+    pub(crate) windows_evaluated: usize,
+    pub(crate) mean_rollout_mse: f32,
+    pub(crate) mean_terminal_distance: f32,
+    pub(crate) mean_action_mse: f32,
+    pub(crate) mean_reward: f32,
+    pub(crate) success_rate: f32,
+    pub(crate) num_candidates: usize,
+    pub(crate) opt_steps: usize,
+    pub(crate) opt_learning_rate: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EvaluationMode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EvaluationMode {
     DatasetOpenLoop,
     SyntheticClosedLoop,
 }
@@ -160,22 +165,22 @@ impl EvaluationMode {
 }
 
 #[derive(Debug, Clone)]
-struct ClosedLoopEpisodeMetrics {
-    rollout_mse: f32,
-    terminal_distance: f32,
-    action_mse: f32,
-    reward: f32,
-    success: bool,
-    replans: usize,
-    executed_steps: usize,
+pub(crate) struct ClosedLoopEpisodeMetrics {
+    pub(crate) rollout_mse: f32,
+    pub(crate) terminal_distance: f32,
+    pub(crate) action_mse: f32,
+    pub(crate) reward: f32,
+    pub(crate) success: bool,
+    pub(crate) replans: usize,
+    pub(crate) executed_steps: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CheckpointEvalSettings {
-    strategy: EvaluationStrategy,
-    num_candidates: usize,
-    opt_steps: usize,
-    opt_learning_rate: f32,
+pub(crate) struct CheckpointEvalSettings {
+    pub(crate) strategy: EvaluationStrategy,
+    pub(crate) num_candidates: usize,
+    pub(crate) opt_steps: usize,
+    pub(crate) opt_learning_rate: f32,
 }
 
 /// Run the eval command.
@@ -196,7 +201,7 @@ pub fn run_eval(args: EvalArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<EvaluationReport> {
+pub(crate) fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<EvaluationReport> {
     let strategy = EvaluationStrategy::parse(&args.strategy)?;
     let device = <EvalBackend as Backend>::Device::default();
     let models = load_models(args, &device)?;
@@ -262,7 +267,7 @@ fn run_checkpoint_eval(args: &EvalArgs, config: &GpcConfig) -> Result<Evaluation
     Ok(report)
 }
 
-fn load_models(
+pub(crate) fn load_models(
     args: &EvalArgs,
     device: &<EvalBackend as Backend>::Device,
 ) -> Result<LoadedModels<EvalBackend>> {
@@ -334,7 +339,7 @@ fn load_evaluation_windows(
     Ok(windows)
 }
 
-fn load_synthetic_episodes(
+pub(crate) fn load_synthetic_episodes(
     args: &EvalArgs,
     models: &LoadedModels<EvalBackend>,
     default_seed: u64,
@@ -457,7 +462,7 @@ fn evaluate_windows(
     })
 }
 
-fn evaluate_synthetic_closed_loop(
+pub(crate) fn evaluate_synthetic_closed_loop(
     models: &LoadedModels<EvalBackend>,
     episodes: &[Episode],
     settings: CheckpointEvalSettings,
@@ -513,7 +518,7 @@ fn evaluate_synthetic_closed_loop(
     })
 }
 
-fn evaluate_closed_loop_episode(
+pub(crate) fn evaluate_closed_loop_episode(
     models: &LoadedModels<EvalBackend>,
     episode: &Episode,
     episode_index: usize,
@@ -629,6 +634,7 @@ fn select_action_sequence_with_trace(
     device: &<EvalBackend as Backend>::Device,
 ) -> Result<Tensor<EvalBackend, 3>> {
     match settings.strategy {
+        EvaluationStrategy::Policy => Ok(models.policy.sample(obs_history, device)?),
         EvaluationStrategy::Rank => {
             Ok(
                 GpcRankBuilder::new(models.policy.clone(), models.world_model.clone(), reward_fn)
@@ -638,16 +644,16 @@ fn select_action_sequence_with_trace(
                     .best_action,
             )
         }
-        EvaluationStrategy::Opt => {
-            Ok(
-                GpcOptBuilder::new(models.policy.clone(), models.world_model.clone(), reward_fn)
-                    .num_opt_steps(settings.opt_steps)
-                    .learning_rate(settings.opt_learning_rate)
-                    .build()
-                    .select_action_with_trace(obs_history, current_state, device)?
-                    .optimized_actions,
-            )
-        }
+        EvaluationStrategy::Opt => Ok(AutodiffGpcOptBuilder::new(
+            models.policy.clone(),
+            models.world_model.clone(),
+            reward_fn,
+        )
+        .num_opt_steps(settings.opt_steps)
+        .learning_rate(settings.opt_learning_rate)
+        .build()
+        .select_action_with_trace(obs_history, current_state, device)?
+        .optimized_actions),
     }
 }
 
@@ -690,6 +696,11 @@ fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
     let state = Tensor::<EvalBackend, 2>::zeros([1, config.world_model.state_dim], &device);
 
     match args.strategy.as_str() {
+        "policy" => {
+            tracing::info!("Policy-only baseline rollout");
+            let sampled = policy.sample(&obs, &device)?;
+            tracing::info!("Sampled action shape: {:?}", sampled.dims());
+        }
         "rank" => {
             let k = args
                 .num_candidates
@@ -707,7 +718,7 @@ fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
             let steps = args.opt_steps.unwrap_or(config.gpc_opt.num_opt_steps);
             tracing::info!("GPC-OPT with {steps} optimization steps");
 
-            let evaluator = GpcOptBuilder::new(policy, world_model, reward_fn)
+            let evaluator = AutodiffGpcOptBuilder::new(policy, world_model, reward_fn)
                 .num_opt_steps(steps)
                 .build();
 
@@ -715,7 +726,7 @@ fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
             tracing::info!("Optimized action shape: {:?}", best.dims());
         }
         other => {
-            anyhow::bail!("Unknown strategy: {other}. Use 'rank' or 'opt'.");
+            anyhow::bail!("Unknown strategy: {other}. Use 'policy', 'rank', or 'opt'.");
         }
     }
 
@@ -738,7 +749,7 @@ fn load_episodes_from_path(path: &str) -> Result<Vec<Episode>> {
     Ok(episodes)
 }
 
-fn generate_synthetic_episodes(
+pub(crate) fn generate_synthetic_episodes(
     state_dim: usize,
     action_dim: usize,
     obs_dim: usize,
@@ -873,7 +884,7 @@ fn validate_episodes_for_evaluation(
     Ok(())
 }
 
-fn validate_episodes_for_closed_loop(
+pub(crate) fn validate_episodes_for_closed_loop(
     episodes: &[Episode],
     policy_config: &PolicyConfig,
     world_model_config: &WorldModelConfig,
