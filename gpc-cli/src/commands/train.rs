@@ -9,11 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpc_core::config::{GpcConfig, PolicyConfig, TrainingConfig, WorldModelConfig};
 use gpc_train::data::{GpcDataset, GpcDatasetConfig};
-use gpc_train::{PolicyTrainer, PolicyTrainingResult, WorldModelTrainer, WorldModelTrainingResult};
+use gpc_train::{
+    PolicyTrainer, PolicyValidationSummary, WorldModelTrainer, WorldModelValidationSummary,
+};
 
 use gpc_compat::{
     CheckpointArtifact, CheckpointFormat, CheckpointKind, CheckpointMetadata,
-    load_world_model_checkpoint, save_policy_checkpoint, save_world_model_checkpoint,
+    save_policy_checkpoint, save_world_model_checkpoint,
 };
 
 type TrainBackend = Autodiff<NdArray>;
@@ -48,6 +50,10 @@ pub struct TrainArgs {
     /// World model prediction horizon for phase 2.
     #[arg(long, default_value = "8")]
     horizon: usize,
+
+    /// Fraction of episodes to hold out for validation.
+    #[arg(long, default_value = "0.0")]
+    validation_split: f32,
 }
 
 /// Run the train command.
@@ -95,18 +101,46 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
 
     std::fs::create_dir_all(&args.output)?;
 
+    let dataset_split = if args.validation_split > 0.0 {
+        Some(dataset.split(args.validation_split, training_config.seed)?)
+    } else {
+        None
+    };
+    let train_dataset = dataset_split
+        .as_ref()
+        .map(|split| &split.train)
+        .unwrap_or(&dataset);
+    let validation_dataset = dataset_split.as_ref().and_then(|split| {
+        if split.validation.num_episodes() > 0 {
+            Some(&split.validation)
+        } else {
+            None
+        }
+    });
+
+    if let Some(split) = &dataset_split {
+        tracing::info!(
+            train_episodes = split.train.num_episodes(),
+            validation_episodes = split.validation.num_episodes(),
+            validation_split = args.validation_split,
+            "dataset split into train and validation subsets"
+        );
+    }
+
     let artifacts = match args.component.as_str() {
         "world-model" | "wm" => train_world_model(
             &training_config,
             &config.world_model,
-            &dataset,
+            train_dataset,
+            validation_dataset,
             &device,
             &args,
         )?,
         "policy" => train_policy(
             &training_config,
             &config.policy,
-            &dataset,
+            train_dataset,
+            validation_dataset,
             &device,
             &args.output,
         )?,
@@ -114,14 +148,16 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
             let mut artifacts = train_world_model(
                 &training_config,
                 &config.world_model,
-                &dataset,
+                train_dataset,
+                validation_dataset,
                 &device,
                 &args,
             )?;
             artifacts.extend(train_policy(
                 &training_config,
                 &config.policy,
-                &dataset,
+                train_dataset,
+                validation_dataset,
                 &device,
                 &args.output,
             )?);
@@ -142,72 +178,156 @@ fn train_world_model(
     training_config: &TrainingConfig,
     world_model_config: &WorldModelConfig,
     dataset: &GpcDataset,
+    validation_dataset: Option<&GpcDataset>,
     device: &<TrainBackend as burn::prelude::Backend>::Device,
     args: &TrainArgs,
 ) -> Result<Vec<CheckpointArtifact>> {
     let trainer = WorldModelTrainer::new(training_config.clone(), world_model_config.clone());
 
     tracing::info!("=== Phase 1: Single-step world model training ===");
-    let phase1_result = trainer.train_phase1_with_summary::<TrainBackend>(dataset, device);
-    let phase1_artifact = save_world_model_stage(
-        phase1_result,
+    let phase1_summary = trainer.train_phase1_with_validation_summary::<TrainBackend>(
+        dataset,
+        validation_dataset,
+        device,
+    );
+    let phase1_artifacts = save_world_model_validation_stages(
+        &phase1_summary,
         world_model_config,
         "world_model_phase1",
         &args.output,
     )?;
 
-    let phase1_model =
-        load_world_model_checkpoint::<TrainBackend>(&phase1_artifact.checkpoint_path, device)?;
+    let phase1_model = if validation_dataset.is_some() {
+        phase1_summary.best_model.clone()
+    } else {
+        phase1_summary.training.model.clone()
+    };
 
     tracing::info!("=== Phase 2: Multi-step world model training ===");
-    let phase2_result = trainer.train_phase2_with_summary::<TrainBackend>(
+    let phase2_summary = trainer.train_phase2_with_validation_summary::<TrainBackend>(
         dataset,
         phase1_model,
         args.horizon,
+        validation_dataset,
         device,
     );
-    let phase2_artifact = save_world_model_stage(
-        phase2_result,
+    let phase2_artifacts = save_world_model_validation_stages(
+        &phase2_summary,
         world_model_config,
         "world_model_final",
         &args.output,
     )?;
 
     tracing::info!("World model training complete");
-    Ok(vec![phase1_artifact, phase2_artifact])
+    let mut artifacts = phase1_artifacts;
+    artifacts.extend(phase2_artifacts);
+    Ok(artifacts)
 }
 
 fn train_policy(
     training_config: &TrainingConfig,
     policy_config: &PolicyConfig,
     dataset: &GpcDataset,
+    validation_dataset: Option<&GpcDataset>,
     device: &<TrainBackend as burn::prelude::Backend>::Device,
     output_dir: &str,
 ) -> Result<Vec<CheckpointArtifact>> {
     let trainer = PolicyTrainer::new(training_config.clone(), policy_config.clone());
 
     tracing::info!("=== Diffusion policy training ===");
-    let result = trainer.train_with_summary::<TrainBackend>(dataset, device);
-    let artifact = save_policy_stage(result, policy_config, "policy_final", output_dir)?;
+    let summary =
+        trainer.train_with_validation_summary::<TrainBackend>(dataset, validation_dataset, device);
+    let artifacts = save_policy_validation_stages(&summary, policy_config, output_dir)?;
 
     tracing::info!("Policy training complete");
-    Ok(vec![artifact])
+    Ok(artifacts)
+}
+
+fn save_policy_validation_stages(
+    summary: &PolicyValidationSummary<TrainBackend>,
+    policy_config: &PolicyConfig,
+    output_dir: &str,
+) -> Result<Vec<CheckpointArtifact>> {
+    let mut artifacts = Vec::new();
+    artifacts.push(save_policy_stage(
+        CheckpointKind::Policy,
+        &summary.training.model,
+        policy_config,
+        "policy_final",
+        output_dir,
+        summary.training.final_epoch,
+        summary.training.final_loss,
+    )?);
+
+    if summary.best_epoch.is_some() {
+        artifacts.push(save_policy_stage(
+            CheckpointKind::Policy,
+            &summary.best_model,
+            policy_config,
+            "policy_best",
+            output_dir,
+            summary.best_epoch,
+            summary.best_validation_loss.or(summary.training.final_loss),
+        )?);
+    }
+
+    Ok(artifacts)
+}
+
+fn save_world_model_validation_stages(
+    summary: &WorldModelValidationSummary<TrainBackend>,
+    world_model_config: &WorldModelConfig,
+    base_name: &str,
+    output_dir: &str,
+) -> Result<Vec<CheckpointArtifact>> {
+    let mut artifacts = Vec::new();
+    artifacts.push(save_world_model_stage(
+        CheckpointKind::WorldModel,
+        &summary.training.model,
+        world_model_config,
+        base_name,
+        output_dir,
+        summary.training.final_epoch,
+        summary.training.final_loss,
+    )?);
+
+    if summary.best_epoch.is_some() {
+        let best_name = if base_name.ends_with("_phase1") {
+            "world_model_phase1_best"
+        } else {
+            "world_model_best"
+        };
+        artifacts.push(save_world_model_stage(
+            CheckpointKind::WorldModel,
+            &summary.best_model,
+            world_model_config,
+            best_name,
+            output_dir,
+            summary.best_epoch,
+            summary.best_validation_loss.or(summary.training.final_loss),
+        )?);
+    }
+
+    Ok(artifacts)
 }
 
 fn save_policy_stage(
-    result: PolicyTrainingResult<TrainBackend>,
+    model_type: CheckpointKind,
+    model: &gpc_policy::DiffusionPolicy<TrainBackend>,
     policy_config: &PolicyConfig,
     name: &str,
     output_dir: &str,
+    epoch: Option<usize>,
+    loss: Option<f32>,
 ) -> Result<CheckpointArtifact> {
     let metadata = checkpoint_metadata(
-        CheckpointKind::Policy,
-        result.final_epoch,
-        result.final_loss,
+        model_type,
+        epoch,
+        loss,
         serde_json::to_string_pretty(policy_config)?,
     );
     let checkpoint = save_policy_checkpoint::<TrainBackend>(
-        result.model,
+        model.clone(),
         &metadata,
         Path::new(output_dir).join(name),
         CheckpointFormat::Bin,
@@ -220,19 +340,22 @@ fn save_policy_stage(
 }
 
 fn save_world_model_stage(
-    result: WorldModelTrainingResult<TrainBackend>,
+    model_type: CheckpointKind,
+    model: &gpc_world::StateWorldModel<TrainBackend>,
     world_model_config: &WorldModelConfig,
     name: &str,
     output_dir: &str,
+    epoch: Option<usize>,
+    loss: Option<f32>,
 ) -> Result<CheckpointArtifact> {
     let metadata = checkpoint_metadata(
-        CheckpointKind::WorldModel,
-        result.final_epoch,
-        result.final_loss,
+        model_type,
+        epoch,
+        loss,
         serde_json::to_string_pretty(world_model_config)?,
     );
     let checkpoint = save_world_model_checkpoint::<TrainBackend>(
-        result.model,
+        model.clone(),
         &metadata,
         Path::new(output_dir).join(name),
         CheckpointFormat::Bin,

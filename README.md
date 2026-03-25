@@ -207,10 +207,13 @@ cargo run -p world-models-gpc-cli -- checkpoint --action convert --path checkpoi
 Training now persists real Burn artifacts by default:
 
 - `policy_final.bin` plus `policy_final.meta.json`
+- `policy_best.bin` plus `policy_best.meta.json` when a validation split is used
 - `world_model_phase1.bin` plus `world_model_phase1.meta.json`
+- `world_model_phase1_best.bin` plus `world_model_phase1_best.meta.json` when a validation split is used
 - `world_model_final.bin` plus `world_model_final.meta.json`
+- `world_model_best.bin` plus `world_model_best.meta.json` when a validation split is used
 
-The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
+Use `--validation-split <fraction>` on `train` to hold out episodes for validation and select the best epoch by validation loss. The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
 
 ## Minimal Library Example
 
@@ -296,7 +299,7 @@ CI workflow: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Limitations
 
-- Checkpoint-backed `eval` reports rollout and action reconstruction metrics against held-out windows; it is not yet a task-specific benchmark harness.
+- Checkpoint-backed `eval` reports rollout and action reconstruction metrics against held-out windows; it prefers `*_best.bin` artifacts when present but is not yet a task-specific benchmark harness.
 - `checkpoint convert` only covers Burn `.bin` and `.mpk` checkpoints for policy and world-model modules.
 - No benchmark scripts or task-level regression suites.
 

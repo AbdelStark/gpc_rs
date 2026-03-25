@@ -1014,22 +1014,35 @@ fn resolved_policy_checkpoint_path(args: &EvalArgs) -> PathBuf {
     args.policy_checkpoint
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_policy_checkpoint_path(args))
+        .unwrap_or_else(|| preferred_policy_checkpoint_path(args))
 }
 
 fn resolved_world_model_checkpoint_path(args: &EvalArgs) -> PathBuf {
     args.world_model_checkpoint
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_world_model_checkpoint_path(args))
+        .unwrap_or_else(|| preferred_world_model_checkpoint_path(args))
 }
 
-fn default_policy_checkpoint_path(args: &EvalArgs) -> PathBuf {
-    PathBuf::from(&args.checkpoint_dir).join("policy_final.bin")
+fn preferred_policy_checkpoint_path(args: &EvalArgs) -> PathBuf {
+    preferred_checkpoint_path(&args.checkpoint_dir, "policy_best.bin", "policy_final.bin")
 }
 
-fn default_world_model_checkpoint_path(args: &EvalArgs) -> PathBuf {
-    PathBuf::from(&args.checkpoint_dir).join("world_model_final.bin")
+fn preferred_world_model_checkpoint_path(args: &EvalArgs) -> PathBuf {
+    preferred_checkpoint_path(
+        &args.checkpoint_dir,
+        "world_model_best.bin",
+        "world_model_final.bin",
+    )
+}
+
+fn preferred_checkpoint_path(checkpoint_dir: &str, preferred: &str, fallback: &str) -> PathBuf {
+    let preferred_path = PathBuf::from(checkpoint_dir).join(preferred);
+    if preferred_path.exists() {
+        return preferred_path;
+    }
+
+    PathBuf::from(checkpoint_dir).join(fallback)
 }
 
 fn log_eval_report(report: &EvaluationReport) {
@@ -1306,6 +1319,143 @@ mod tests {
         ))
     }
 
+    fn save_tiny_checkpoints_with_best(
+        dir: &Path,
+    ) -> Result<(
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PolicyConfig,
+        WorldModelConfig,
+    )> {
+        let device = <EvalBackend as Backend>::Device::default();
+        let dataset = generate_synthetic_episodes(4, 2, 4, 10, 4, 52);
+        let dataset_config = gpc_train::data::GpcDatasetConfig {
+            data_dir: "synthetic".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+        let gpc_dataset = gpc_train::data::GpcDataset::new(dataset, dataset_config);
+        let split = gpc_dataset.split(0.25, 99)?;
+
+        let training_config = TrainingConfig {
+            num_epochs: 1,
+            batch_size: 4,
+            learning_rate: 1e-3,
+            log_every: 1,
+            ..Default::default()
+        };
+
+        let policy_config = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            action_horizon: 1,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            noise_schedule: gpc_core::config::NoiseScheduleConfig {
+                num_timesteps: 8,
+                beta_start: 1e-4,
+                beta_end: 0.02,
+            },
+        };
+        let world_model_config = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            dropout: 0.0,
+        };
+
+        let policy_summary = PolicyTrainer::new(training_config.clone(), policy_config.clone())
+            .train_with_validation_summary::<EvalBackend>(
+            &split.train,
+            Some(&split.validation),
+            &device,
+        );
+        let phase1_summary =
+            WorldModelTrainer::new(training_config.clone(), world_model_config.clone())
+                .train_phase1_with_validation_summary::<EvalBackend>(
+                    &split.train,
+                    Some(&split.validation),
+                    &device,
+                );
+        let phase2_summary = WorldModelTrainer::new(training_config, world_model_config.clone())
+            .train_phase2_with_validation_summary::<EvalBackend>(
+            &split.train,
+            phase1_summary.best_model.clone(),
+            2,
+            Some(&split.validation),
+            &device,
+        );
+
+        let policy_final_path = save_policy_checkpoint(
+            policy_summary.training.model,
+            &checkpoint_metadata(
+                CheckpointKind::Policy,
+                policy_summary.training.final_epoch,
+                policy_summary.training.final_loss,
+                serde_json::to_string(&policy_config)?,
+            ),
+            dir.join("policy_final"),
+            CheckpointFormat::Bin,
+        )?
+        .checkpoint_path;
+
+        let policy_best_path = save_policy_checkpoint(
+            policy_summary.best_model,
+            &checkpoint_metadata(
+                CheckpointKind::Policy,
+                policy_summary.best_epoch,
+                policy_summary.best_validation_loss,
+                serde_json::to_string(&policy_config)?,
+            ),
+            dir.join("policy_best"),
+            CheckpointFormat::Bin,
+        )?
+        .checkpoint_path;
+
+        let world_model_final_path = save_world_model_checkpoint(
+            phase2_summary.training.model,
+            &checkpoint_metadata(
+                CheckpointKind::WorldModel,
+                phase2_summary.training.final_epoch,
+                phase2_summary.training.final_loss,
+                serde_json::to_string(&world_model_config)?,
+            ),
+            dir.join("world_model_final"),
+            CheckpointFormat::Bin,
+        )?
+        .checkpoint_path;
+
+        let world_model_best_path = save_world_model_checkpoint(
+            phase2_summary.best_model,
+            &checkpoint_metadata(
+                CheckpointKind::WorldModel,
+                phase2_summary.best_epoch,
+                phase2_summary.best_validation_loss,
+                serde_json::to_string(&world_model_config)?,
+            ),
+            dir.join("world_model_best"),
+            CheckpointFormat::Bin,
+        )?
+        .checkpoint_path;
+
+        Ok((
+            policy_final_path,
+            policy_best_path,
+            world_model_final_path,
+            world_model_best_path,
+            policy_config,
+            world_model_config,
+        ))
+    }
+
     #[test]
     fn checkpoint_eval_runs_end_to_end() {
         let dir = temp_eval_dir("end_to_end");
@@ -1388,6 +1538,123 @@ mod tests {
 
         assert_eq!(report.mode, EvaluationMode::DatasetOpenLoop);
         assert_eq!(report.windows_evaluated, 8);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preferred_checkpoint_paths_use_best_artifacts_when_available() {
+        let dir = temp_eval_dir("preferred_best");
+        let (
+            policy_final_path,
+            policy_best_path,
+            world_model_final_path,
+            world_model_best_path,
+            _,
+            _,
+        ) = save_tiny_checkpoints_with_best(&dir).unwrap();
+
+        let args = EvalArgs {
+            strategy: "rank".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: None,
+            world_model_checkpoint: None,
+            data: None,
+            synthetic: true,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: Some(2),
+            opt_steps: Some(1),
+            opt_learning_rate: None,
+            seed: Some(42),
+            demo: false,
+        };
+
+        assert_eq!(resolved_policy_checkpoint_path(&args), policy_best_path);
+        assert_eq!(
+            resolved_world_model_checkpoint_path(&args),
+            world_model_best_path
+        );
+        assert_ne!(resolved_policy_checkpoint_path(&args), policy_final_path);
+        assert_ne!(
+            resolved_world_model_checkpoint_path(&args),
+            world_model_final_path
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preferred_checkpoint_paths_fall_back_to_final_artifacts() {
+        let dir = temp_eval_dir("preferred_final");
+        let (policy_path, world_model_path, _, _) = save_tiny_checkpoints(&dir).unwrap();
+
+        let args = EvalArgs {
+            strategy: "rank".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: None,
+            world_model_checkpoint: None,
+            data: None,
+            synthetic: true,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: Some(2),
+            opt_steps: Some(1),
+            opt_learning_rate: None,
+            seed: Some(42),
+            demo: false,
+        };
+
+        assert_eq!(resolved_policy_checkpoint_path(&args), policy_path);
+        assert_eq!(
+            resolved_world_model_checkpoint_path(&args),
+            world_model_path
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_checkpoint_paths_override_directory_preference() {
+        let dir = temp_eval_dir("explicit_override");
+        let (
+            policy_final_path,
+            policy_best_path,
+            world_model_final_path,
+            world_model_best_path,
+            _,
+            _,
+        ) = save_tiny_checkpoints_with_best(&dir).unwrap();
+
+        let args = EvalArgs {
+            strategy: "rank".to_string(),
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_final_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_final_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: true,
+            episodes: 1,
+            episode_length: 6,
+            num_candidates: Some(2),
+            opt_steps: Some(1),
+            opt_learning_rate: None,
+            seed: Some(42),
+            demo: false,
+        };
+
+        assert_eq!(resolved_policy_checkpoint_path(&args), policy_final_path);
+        assert_eq!(
+            resolved_world_model_checkpoint_path(&args),
+            world_model_final_path
+        );
+        assert_ne!(resolved_policy_checkpoint_path(&args), policy_best_path);
+        assert_ne!(
+            resolved_world_model_checkpoint_path(&args),
+            world_model_best_path
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
