@@ -9,6 +9,8 @@ pub mod data;
 pub mod policy_trainer;
 pub mod world_model_trainer;
 
-pub use data::{GpcDataset, GpcDatasetConfig};
-pub use policy_trainer::{PolicyTrainer, PolicyTrainingResult};
-pub use world_model_trainer::{WorldModelTrainer, WorldModelTrainingResult};
+pub use data::{GpcDataset, GpcDatasetConfig, GpcDatasetSplit};
+pub use policy_trainer::{PolicyTrainer, PolicyTrainingResult, PolicyValidationSummary};
+pub use world_model_trainer::{
+    WorldModelTrainer, WorldModelTrainingResult, WorldModelValidationSummary,
+};

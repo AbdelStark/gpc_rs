@@ -1,8 +1,14 @@
 //! Dataset and data loading for GPC training.
 
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
 use serde::{Deserialize, Serialize};
+
+/// A world model sequence sample: (initial_state, action_sequence, target_states).
+pub type WorldModelTransitionSample = (Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// A world model sequence sample: (initial_state, action_sequence, target_states).
 pub type WorldModelSequenceSample = (Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>);
@@ -38,6 +44,15 @@ impl Default for GpcDatasetConfig {
             pred_horizon: 16,
         }
     }
+}
+
+/// A deterministic split of a GPC dataset into train and validation subsets.
+#[derive(Debug, Clone)]
+pub struct GpcDatasetSplit {
+    /// Training subset.
+    pub train: GpcDataset,
+    /// Validation subset.
+    pub validation: GpcDataset,
 }
 
 /// A single demonstration episode.
@@ -142,8 +157,65 @@ impl GpcDataset {
         self.episodes.len()
     }
 
+    /// Deterministically split the dataset into train and validation subsets.
+    ///
+    /// The split operates at the episode level so the resulting subsets remain
+    /// internally consistent. The shuffle is seeded so repeated calls with the
+    /// same seed produce identical splits.
+    pub fn split(&self, validation_fraction: f32, seed: u64) -> gpc_core::Result<GpcDatasetSplit> {
+        if !(0.0..1.0).contains(&validation_fraction) {
+            return Err(gpc_core::GpcError::Config(
+                "validation_fraction must be in [0.0, 1.0)".into(),
+            ));
+        }
+
+        if self.episodes.is_empty() {
+            return Ok(GpcDatasetSplit {
+                train: Self::new(Vec::new(), self.config.clone()),
+                validation: Self::new(Vec::new(), self.config.clone()),
+            });
+        }
+
+        if validation_fraction > 0.0 && self.episodes.len() < 2 {
+            return Err(gpc_core::GpcError::Config(
+                "cannot create a validation split from a single episode".into(),
+            ));
+        }
+
+        let mut indices: Vec<usize> = (0..self.episodes.len()).collect();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        indices.shuffle(&mut rng);
+
+        let mut validation_count =
+            (self.episodes.len() as f32 * validation_fraction).round() as usize;
+        if validation_fraction > 0.0 {
+            validation_count = validation_count.max(1);
+        }
+        validation_count = validation_count.min(self.episodes.len().saturating_sub(1));
+
+        let validation_indices = &indices[..validation_count];
+        let train_indices = &indices[validation_count..];
+
+        Ok(GpcDatasetSplit {
+            train: Self::new(
+                train_indices
+                    .iter()
+                    .map(|&index| self.episodes[index].clone())
+                    .collect(),
+                self.config.clone(),
+            ),
+            validation: Self::new(
+                validation_indices
+                    .iter()
+                    .map(|&index| self.episodes[index].clone())
+                    .collect(),
+                self.config.clone(),
+            ),
+        })
+    }
+
     /// Extract world model training samples (state, action, next_state).
-    pub fn world_model_samples(&self) -> Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+    pub fn world_model_samples(&self) -> Vec<WorldModelTransitionSample> {
         let mut samples = Vec::new();
         for ep in &self.episodes {
             for t in 0..ep.actions.len() {
@@ -217,6 +289,10 @@ impl<B: Backend> WorldModelBatcher<B> {
     /// Create a new batcher.
     pub fn new(device: B::Device) -> Self {
         Self { device }
+    }
+
+    pub(crate) fn device(&self) -> &B::Device {
+        &self.device
     }
 }
 
@@ -292,6 +368,10 @@ impl<B: Backend> PolicyBatcher<B> {
             obs_horizon,
             pred_horizon,
         }
+    }
+
+    pub(crate) fn device(&self) -> &B::Device {
+        &self.device
     }
 }
 
@@ -413,5 +493,39 @@ mod tests {
         assert!(!seqs.is_empty());
         assert_eq!(seqs[0].1.len(), 4); // horizon actions
         assert_eq!(seqs[0].2.len(), 4); // horizon target states
+    }
+
+    #[test]
+    fn test_split_is_deterministic() {
+        let config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(config, 6, 12, 7);
+        let first = dataset.split(0.25, 99).unwrap();
+        let second = dataset.split(0.25, 99).unwrap();
+
+        assert_eq!(first.train.num_episodes(), second.train.num_episodes());
+        assert_eq!(
+            first.validation.num_episodes(),
+            second.validation.num_episodes()
+        );
+        assert_eq!(
+            first.train.world_model_samples(),
+            second.train.world_model_samples()
+        );
+        assert_eq!(
+            first.validation.world_model_samples(),
+            second.validation.world_model_samples()
+        );
+        assert_eq!(
+            first.train.num_episodes() + first.validation.num_episodes(),
+            dataset.num_episodes()
+        );
     }
 }
