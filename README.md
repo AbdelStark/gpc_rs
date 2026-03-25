@@ -167,7 +167,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
 | `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
 | `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` against synthetic or JSON datasets; `-o/--output` writes a summary JSON artifact and `--details-output` writes detailed telemetry |
-| `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks and can emit JSON for regressions |
+| `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks, emits JSON, and can gate regressions against a saved baseline |
 | `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
 | `init-config` | Write a default JSON config file | Prints the generated config to stdout |
 
@@ -203,6 +203,9 @@ cargo run -p world-models-gpc-cli -- benchmark --checkpoint-dir runs/exp-001 --e
 # Benchmark dataset windows instead of synthetic closed-loop episodes
 cargo run -p world-models-gpc-cli -- benchmark --checkpoint-dir runs/exp-001 --data data --strategy rank --strategy opt --num-candidates 64 --opt-steps 10 --opt-learning-rate 0.01 --output runs/exp-001/dataset-benchmark.json
 
+# Compare a fresh benchmark run against a saved baseline and fail on regressions
+cargo run -p world-models-gpc-cli -- benchmark --checkpoint-dir runs/exp-001 --episodes 8 --episode-length 24 --seed 42 --seed 43 --seed 44 --num-candidates 64 --opt-steps 10 --opt-learning-rate 0.01 --output runs/exp-001/benchmark-candidate-64.json --baseline runs/exp-001/benchmark-baseline.json --max-rollout-mse-increase 0.002 --max-terminal-distance-increase 0.01 --max-reward-drop 0.05 --max-success-rate-drop 0.02
+
 # Run evaluator demos with random models
 cargo run -p world-models-gpc-cli -- eval --demo --strategy policy
 cargo run -p world-models-gpc-cli -- eval --demo --strategy rank --num-candidates 64
@@ -228,6 +231,8 @@ Training now persists real Burn artifacts by default:
 Use `--validation-split <fraction>` on `train` to hold out episodes for validation and select the best epoch by validation loss. The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
 
 Within `gpc-train`, `TrainingConfig.seed` now seeds model initialization, minibatch shuffling, and policy diffusion noise/timestep sampling so repeated runs on the same backend/device are reproducible.
+
+When `benchmark` is run with `--baseline <previous-report.json>`, the emitted JSON includes a `comparison` section for every shared strategy and the CLI can turn metric deltas into a hard failure via `--max-rollout-mse-increase`, `--max-terminal-distance-increase`, `--max-action-mse-increase`, `--max-reward-drop`, and `--max-success-rate-drop`.
 
 ## Minimal Library Example
 
