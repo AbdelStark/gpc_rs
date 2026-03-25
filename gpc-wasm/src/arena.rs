@@ -200,21 +200,25 @@ pub fn goal_distance_from_slice(values: &[f32]) -> f32 {
 }
 
 pub fn min_clearance_from_slice(values: &[f32]) -> f32 {
-    let effector = effector_from_slice(values);
-    let obstacle_a = Obstacle {
-        x: values[6],
-        y: values[7],
-        radius: values[8],
-    };
-    let obstacle_b = Obstacle {
-        x: values[9],
-        y: values[10],
-        radius: values[11],
-    };
+    use crate::types::point_to_segment_distance;
 
-    let clearance_a = effector.distance(obstacle_a.center()) - obstacle_a.radius;
-    let clearance_b = effector.distance(obstacle_b.center()) - obstacle_b.radius;
-    clearance_a.min(clearance_b)
+    let theta1 = values[0];
+    let theta2 = values[1];
+    let pose = forward_kinematics(theta1, theta2);
+
+    let obstacles = [
+        Obstacle { x: values[6], y: values[7], radius: values[8] },
+        Obstacle { x: values[9], y: values[10], radius: values[11] },
+    ];
+
+    let mut min_clearance = f32::MAX;
+    for obs in &obstacles {
+        let center = obs.center();
+        let d_upper = point_to_segment_distance(center, pose.base, pose.elbow) - obs.radius;
+        let d_lower = point_to_segment_distance(center, pose.elbow, pose.effector) - obs.radius;
+        min_clearance = min_clearance.min(d_upper).min(d_lower);
+    }
+    min_clearance
 }
 
 pub fn apply_action(state: &RobotState, action: [f32; 2]) -> RobotState {
@@ -236,11 +240,17 @@ pub fn expert_action(state: &RobotState, rng: &mut StdRng) -> [f32; 2] {
         .scale((to_goal.length() * 0.22).clamp(0.02, 0.16));
 
     for obstacle in &state.obstacles {
-        let away = effector.sub(obstacle.center());
-        let clearance = away.length() - obstacle.radius;
-        if clearance < 0.42 {
-            let strength = (0.42 - clearance).powi(2) * 1.6;
-            desired = desired.add(away.normalized().scale(strength));
+        let center = obstacle.center();
+        // Check both arm segments, not just the effector
+        let segments = [(pose.base, pose.elbow), (pose.elbow, pose.effector)];
+        for (seg_a, seg_b) in &segments {
+            let seg_dist = crate::types::point_to_segment_distance(center, *seg_a, *seg_b);
+            let clearance = seg_dist - obstacle.radius;
+            if clearance < 0.42 {
+                let away = effector.sub(center);
+                let strength = (0.42 - clearance).powi(2) * 1.6;
+                desired = desired.add(away.normalized().scale(strength));
+            }
         }
     }
 

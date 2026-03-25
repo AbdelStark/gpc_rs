@@ -65,9 +65,25 @@ impl Vec2 {
         }
     }
 
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
     pub fn distance(self, other: Self) -> f32 {
         self.sub(other).length()
     }
+}
+
+/// Minimum distance from point `p` to the line segment `a`--`b`.
+pub fn point_to_segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b.sub(a);
+    let len_sq = ab.dot(ab);
+    if len_sq <= f32::EPSILON {
+        return p.distance(a);
+    }
+    let t = p.sub(a).dot(ab) / len_sq;
+    let closest = a.add(ab.scale(t.clamp(0.0, 1.0)));
+    p.distance(closest)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
