@@ -165,7 +165,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | Command | Purpose | Notes |
 | --- | --- | --- |
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
-| `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
+| `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json`; writes `train_report.json` under the output dir unless `--report-output` is set |
 | `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` against synthetic or JSON datasets; `-o/--output` writes a summary JSON artifact and `--details-output` writes detailed telemetry |
 | `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks, emits JSON, and can gate regressions against a saved baseline |
 | `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
@@ -185,6 +185,9 @@ cargo run -p world-models-gpc-cli -- train --data data --component world-model -
 
 # Save checkpoints to a custom directory
 cargo run -p world-models-gpc-cli -- train --synthetic --component all --output runs/exp-001
+
+# Write the training report to a custom path
+cargo run -p world-models-gpc-cli -- train --synthetic --component all --output runs/exp-001 --report-output runs/exp-001/reports/train-report.json
 
 # Run checkpoint-backed evaluation on reproducible synthetic data
 cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --strategy policy --synthetic --episodes 8 --episode-length 24 --seed 42
