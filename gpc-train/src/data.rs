@@ -421,6 +421,18 @@ fn validate_episode(
         )));
     }
 
+    let action_dim = episode
+        .actions
+        .first()
+        .map(|action| action.len())
+        .expect("episode actions checked to be non-empty");
+    if action_dim != policy_config.action_dim || action_dim != world_model_config.action_dim {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} action dimension mismatch: dataset={} policy={} world_model={}",
+            action_dim, policy_config.action_dim, world_model_config.action_dim
+        )));
+    }
+
     validate_sequence_shapes(
         &episode.states,
         world_model_config.state_dim,
@@ -791,5 +803,18 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("Dimension mismatch"));
         assert!(message.contains("episode 0 state 0"));
+    }
+
+    #[test]
+    fn test_validate_episodes_rejects_world_model_action_dimension_mismatch() {
+        let (policy, mut world) = valid_policy_world_configs();
+        world.action_dim = 3;
+        let episodes = vec![valid_episode()];
+
+        let err = validate_episodes(&episodes, &policy, &world).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("action dimension mismatch"));
+        assert!(message.contains("policy=2"));
+        assert!(message.contains("world_model=3"));
     }
 }
