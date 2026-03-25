@@ -32,8 +32,8 @@ use crate::arena::{
 };
 use crate::dataset::DemoDataset;
 use crate::types::{
-    CandidateSummary, MissionPlayback, MissionSpec, MissionSummary, PlanningFrame, RuntimeOverview,
-    RuntimeSnapshot, Vec2,
+    CandidateSummary, MissionPlayback, MissionSpec, MissionSummary, PlanningFrame,
+    RuntimeBuildConfig, RuntimeOverview, RuntimeSnapshot, Vec2,
 };
 
 type TrainBackend = Autodiff<NdArray>;
@@ -41,35 +41,6 @@ type InferBackend = NdArray;
 
 const TOP_CANDIDATES: usize = 7;
 const GOAL_SUCCESS_THRESHOLD: f32 = 0.1;
-
-#[derive(Clone, Debug)]
-struct BuildConfig {
-    dataset_seed: u64,
-    dataset_episodes: usize,
-    episode_length: usize,
-    world_phase1_epochs: usize,
-    world_phase2_epochs: usize,
-    policy_epochs: usize,
-    batch_size: usize,
-    recommended_candidates: usize,
-    recommended_opt_steps: usize,
-}
-
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            dataset_seed: 42,
-            dataset_episodes: 72,
-            episode_length: 14,
-            world_phase1_epochs: 12,
-            world_phase2_epochs: 8,
-            policy_epochs: 16,
-            batch_size: 24,
-            recommended_candidates: 18,
-            recommended_opt_steps: 2,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 struct ArenaReward;
@@ -125,7 +96,8 @@ struct Engine {
 }
 
 impl Engine {
-    fn bootstrap(config: BuildConfig) -> gpc_core::Result<Self> {
+    fn bootstrap(config: RuntimeBuildConfig) -> gpc_core::Result<Self> {
+        config.validate()?;
         let started = Instant::now();
         let train_device = <TrainBackend as Backend>::Device::default();
         let dataset = build_training_dataset(
@@ -162,14 +134,16 @@ impl Engine {
             policy_loss_curve,
             recommended_candidates: config.recommended_candidates,
             recommended_opt_steps: config.recommended_opt_steps,
+            build_config: config.clone(),
         };
+        let opt_steps = config.recommended_opt_steps;
 
         Ok(Self {
             policy,
             world_model,
             missions: preset_missions(),
             overview,
-            opt_steps: config.recommended_opt_steps,
+            opt_steps,
         })
     }
 
@@ -341,6 +315,11 @@ struct SimulateRequest {
     num_candidates: usize,
 }
 
+#[derive(Deserialize)]
+struct RebuildRequest {
+    config: RuntimeBuildConfig,
+}
+
 async fn handle_simulate(
     State(engine): State<AppState>,
     Json(request): Json<SimulateRequest>,
@@ -356,6 +335,25 @@ async fn handle_simulate(
         })?;
 
     Ok(Json(result))
+}
+
+async fn handle_rebuild(
+    State(engine): State<AppState>,
+    Json(request): Json<RebuildRequest>,
+) -> Result<Json<RuntimeSnapshot>, (StatusCode, String)> {
+    let new_engine = Engine::bootstrap(request.config).map_err(|error| {
+        let status = match error {
+            gpc_core::GpcError::Config(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, format!("rebuild error: {error}"))
+    })?;
+
+    let snapshot = new_engine.snapshot();
+    let mut engine = engine.lock().expect("engine lock poisoned");
+    *engine = new_engine;
+
+    Ok(Json(snapshot))
 }
 
 async fn handle_health() -> &'static str {
@@ -374,7 +372,7 @@ async fn main() {
         .init();
 
     tracing::info!("bootstrapping engine (training models)…");
-    let engine = Engine::bootstrap(BuildConfig::default()).expect("engine bootstrap failed");
+    let engine = Engine::bootstrap(RuntimeBuildConfig::default()).expect("engine bootstrap failed");
     tracing::info!("engine ready, starting HTTP server");
 
     let state: AppState = Arc::new(Mutex::new(engine));
@@ -382,6 +380,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(handle_health))
         .route("/api/snapshot", get(handle_snapshot))
+        .route("/api/rebuild", post(handle_rebuild))
         .route("/api/simulate", post(handle_simulate))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -398,7 +397,7 @@ async fn main() {
 fn train_world_model(
     dataset: &DemoDataset,
     device: &<TrainBackend as Backend>::Device,
-    config: &BuildConfig,
+    config: &RuntimeBuildConfig,
 ) -> gpc_core::Result<(gpc_world::StateWorldModel<InferBackend>, Vec<f32>)> {
     let model_config = StateWorldModelConfig {
         state_dim: STATE_DIM,
@@ -412,6 +411,11 @@ fn train_world_model(
     let mut losses = Vec::with_capacity(config.world_phase1_epochs + config.world_phase2_epochs);
 
     let samples = dataset.world_model_samples();
+    if samples.is_empty() {
+        return Err(gpc_core::GpcError::Training(
+            "world model dataset is empty".to_string(),
+        ));
+    }
     let batch_size = config.batch_size.min(samples.len());
 
     for epoch in 0..config.world_phase1_epochs {
@@ -517,7 +521,7 @@ fn train_world_model(
 fn train_policy(
     dataset: &DemoDataset,
     device: &<TrainBackend as Backend>::Device,
-    config: &BuildConfig,
+    config: &RuntimeBuildConfig,
 ) -> gpc_core::Result<(DiffusionPolicy<InferBackend>, Vec<f32>)> {
     let schedule_config = NoiseScheduleConfig {
         num_timesteps: 24,
@@ -542,6 +546,11 @@ fn train_policy(
     let mut optimizer = optimizer_config.init();
 
     let samples = dataset.policy_samples();
+    if samples.is_empty() {
+        return Err(gpc_core::GpcError::Training(
+            "policy dataset is empty".to_string(),
+        ));
+    }
     let batch_size = config.batch_size.min(samples.len());
     let mut losses = Vec::with_capacity(config.policy_epochs);
 
@@ -612,6 +621,58 @@ fn train_policy(
     }
 
     Ok((model.valid(), losses))
+}
+
+impl RuntimeBuildConfig {
+    fn validate(&self) -> gpc_core::Result<()> {
+        if self.dataset_episodes == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "dataset_episodes must be greater than zero".to_string(),
+            ));
+        }
+        if self.episode_length == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "episode_length must be greater than zero".to_string(),
+            ));
+        }
+        if self.episode_length <= PRED_HORIZON {
+            return Err(gpc_core::GpcError::Config(format!(
+                "episode_length must be greater than PRED_HORIZON ({PRED_HORIZON})"
+            )));
+        }
+        if self.world_phase1_epochs == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "world_phase1_epochs must be greater than zero".to_string(),
+            ));
+        }
+        if self.world_phase2_epochs == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "world_phase2_epochs must be greater than zero".to_string(),
+            ));
+        }
+        if self.policy_epochs == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "policy_epochs must be greater than zero".to_string(),
+            ));
+        }
+        if self.batch_size == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "batch_size must be greater than zero".to_string(),
+            ));
+        }
+        if self.recommended_candidates == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "recommended_candidates must be greater than zero".to_string(),
+            ));
+        }
+        if self.recommended_opt_steps == 0 {
+            return Err(gpc_core::GpcError::Config(
+                "recommended_opt_steps must be greater than zero".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 // -- tensor helpers ---------------------------------------------------------
@@ -782,4 +843,51 @@ fn tensor_to_vec<const D: usize, B: Backend>(tensor: Tensor<B, D>) -> gpc_core::
     tensor.into_data().to_vec().map_err(|error| {
         gpc_core::GpcError::Evaluation(format!("failed to extract tensor data: {error:?}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> RuntimeBuildConfig {
+        RuntimeBuildConfig {
+            dataset_seed: 42,
+            dataset_episodes: 4,
+            episode_length: 8,
+            world_phase1_epochs: 1,
+            world_phase2_epochs: 1,
+            policy_epochs: 1,
+            batch_size: 2,
+            recommended_candidates: 3,
+            recommended_opt_steps: 2,
+        }
+    }
+
+    #[test]
+    fn config_validation_rejects_zero_values() {
+        let mut config = sample_config();
+        config.batch_size = 0;
+
+        let error = config.validate().expect_err("expected validation failure");
+        assert!(matches!(error, gpc_core::GpcError::Config(_)));
+    }
+
+    #[test]
+    fn config_validation_rejects_episode_length_at_or_below_horizon() {
+        let mut config = sample_config();
+        config.episode_length = PRED_HORIZON;
+
+        let error = config.validate().expect_err("expected validation failure");
+        assert!(
+            matches!(error, gpc_core::GpcError::Config(message) if message.contains("PRED_HORIZON"))
+        );
+    }
+
+    #[test]
+    fn bootstrap_snapshot_reflects_config() {
+        let config = sample_config();
+        let engine = Engine::bootstrap(config.clone()).expect("bootstrap should succeed");
+
+        assert_eq!(engine.snapshot().overview.build_config, config);
+    }
 }

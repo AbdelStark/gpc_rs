@@ -1,4 +1,4 @@
-import type { MissionPlayback, PlannerMode, RuntimeSnapshot } from './types'
+import type { MissionPlayback, PlannerMode, RuntimeBuildConfig, RuntimeSnapshot } from './types'
 
 const BASE = '/api'
 
@@ -26,6 +26,18 @@ export async function fetchSimulation(
   })
   if (!response.ok) {
     throw new Error(`simulate failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function fetchRebuild(config: RuntimeBuildConfig): Promise<RuntimeSnapshot> {
+  const response = await fetch(`${BASE}/rebuild`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config }),
+  })
+  if (!response.ok) {
+    throw new Error(`rebuild failed: ${response.status}`)
   }
   return response.json()
 }

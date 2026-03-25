@@ -5,6 +5,7 @@ export class DemoRuntime {
     free(): void;
     [Symbol.dispose](): void;
     constructor();
+    rebuild(config: any): any;
     simulate_mission(mission_id: string, mode: string, num_candidates: number): any;
     snapshot(): any;
 }
@@ -17,6 +18,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_demoruntime_free: (a: number, b: number) => void;
     readonly demoruntime_new: () => [number, number, number];
+    readonly demoruntime_rebuild: (a: number, b: any) => [number, number, number];
     readonly demoruntime_simulate_mission: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly demoruntime_snapshot: (a: number) => [number, number, number];
     readonly init: () => void;

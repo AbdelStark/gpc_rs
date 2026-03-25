@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeBuildConfig {
+    pub dataset_seed: u64,
+    pub dataset_episodes: usize,
+    pub episode_length: usize,
+    pub world_phase1_epochs: usize,
+    pub world_phase2_epochs: usize,
+    pub policy_epochs: usize,
+    pub batch_size: usize,
+    pub recommended_candidates: usize,
+    pub recommended_opt_steps: usize,
+}
+
+impl Default for RuntimeBuildConfig {
+    fn default() -> Self {
+        Self {
+            dataset_seed: 42,
+            dataset_episodes: 72,
+            episode_length: 14,
+            world_phase1_epochs: 12,
+            world_phase2_epochs: 8,
+            policy_epochs: 16,
+            batch_size: 24,
+            recommended_candidates: 18,
+            recommended_opt_steps: 2,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Vec2 {
     pub x: f32,
@@ -134,6 +163,7 @@ pub struct RuntimeOverview {
     pub policy_loss_curve: Vec<f32>,
     pub recommended_candidates: usize,
     pub recommended_opt_steps: usize,
+    pub build_config: RuntimeBuildConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

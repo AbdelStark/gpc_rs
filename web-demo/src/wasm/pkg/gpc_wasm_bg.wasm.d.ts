@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_demoruntime_free: (a: number, b: number) => void;
 export const demoruntime_new: () => [number, number, number];
+export const demoruntime_rebuild: (a: number, b: any) => [number, number, number];
 export const demoruntime_simulate_mission: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const demoruntime_snapshot: (a: number) => [number, number, number];
 export const init: () => void;

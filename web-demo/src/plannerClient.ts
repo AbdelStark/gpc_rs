@@ -1,11 +1,16 @@
-import { fetchSimulation, fetchSnapshot, healthCheck } from './api'
-import type { MissionPlayback, PlannerMode, RuntimeSnapshot } from './types'
+import { fetchRebuild, fetchSimulation, fetchSnapshot, healthCheck } from './api'
+import type {
+  MissionPlayback,
+  PlannerMode,
+  RuntimeBuildConfig,
+  RuntimeSnapshot,
+} from './types'
 
 export type PlannerRuntimeSource = 'browser' | 'server'
 
 export interface PlannerStatus {
   source: PlannerRuntimeSource
-  phase: 'booting' | 'ready' | 'planning' | 'fallback'
+  phase: 'booting' | 'ready' | 'planning' | 'rebuilding' | 'fallback'
   message: string
 }
 
@@ -17,6 +22,7 @@ export interface PlannerClient {
     mode: PlannerMode,
     numCandidates: number,
   ): Promise<MissionPlayback>
+  rebuild(config: RuntimeBuildConfig): Promise<RuntimeSnapshot>
   close(): void
 }
 
@@ -185,6 +191,20 @@ class BrowserPlannerClient implements PlannerClient {
     return response.playback
   }
 
+  async rebuild(config: RuntimeBuildConfig): Promise<RuntimeSnapshot> {
+    const response = await this.request({
+      type: 'rebuild',
+      config,
+    })
+
+    if (response.type !== 'snapshot') {
+      throw new Error(`Unexpected worker response during rebuild: ${response.type}`)
+    }
+
+    this.snapshotCache = response.snapshot
+    return response.snapshot
+  }
+
   close() {
     this.worker.removeEventListener('message', this.handleMessage)
     this.worker.removeEventListener('error', this.handleError)
@@ -264,6 +284,10 @@ class RestPlannerClient implements PlannerClient {
     return fetchSimulation(missionId, mode, numCandidates)
   }
 
+  async rebuild(config: RuntimeBuildConfig): Promise<RuntimeSnapshot> {
+    return fetchRebuild(config)
+  }
+
   close() {}
 }
 
@@ -271,6 +295,8 @@ function mapWorkerPhase(phase: WorkerStatus['phase']): PlannerStatus['phase'] {
   switch (phase) {
     case 'initializing':
       return 'booting'
+    case 'rebuilding':
+      return 'rebuilding'
     case 'planning':
       return 'planning'
     default:

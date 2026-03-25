@@ -1,5 +1,29 @@
 export type PlannerMode = 'rank' | 'opt'
 
+export interface RuntimeBuildConfig {
+  dataset_seed: number
+  dataset_episodes: number
+  episode_length: number
+  world_phase1_epochs: number
+  world_phase2_epochs: number
+  policy_epochs: number
+  batch_size: number
+  recommended_candidates: number
+  recommended_opt_steps: number
+}
+
+export const DEFAULT_RUNTIME_BUILD_CONFIG: RuntimeBuildConfig = {
+  dataset_seed: 42,
+  dataset_episodes: 72,
+  episode_length: 14,
+  world_phase1_epochs: 12,
+  world_phase2_epochs: 8,
+  policy_epochs: 16,
+  batch_size: 24,
+  recommended_candidates: 18,
+  recommended_opt_steps: 2,
+}
+
 export interface Vec2 {
   x: number
   y: number
@@ -84,6 +108,7 @@ export interface RuntimeOverview {
   policy_loss_curve: number[]
   recommended_candidates: number
   recommended_opt_steps: number
+  build_config: RuntimeBuildConfig
 }
 
 export interface RuntimeSnapshot {
@@ -94,6 +119,10 @@ export interface RuntimeSnapshot {
 export type WorkerRequest =
   | { type: 'bootstrap' }
   | {
+      type: 'rebuild'
+      config: RuntimeBuildConfig
+    }
+  | {
       type: 'simulate'
       missionId: string
       mode: PlannerMode
@@ -101,7 +130,7 @@ export type WorkerRequest =
     }
 
 export type WorkerResponse =
-  | { type: 'status'; phase: 'initializing' | 'planning'; message: string }
+  | { type: 'status'; phase: 'initializing' | 'rebuilding' | 'planning'; message: string }
   | { type: 'snapshot'; snapshot: RuntimeSnapshot }
   | { type: 'playback'; playback: MissionPlayback }
   | { type: 'error'; message: string }

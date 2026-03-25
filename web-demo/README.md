@@ -2,7 +2,7 @@
 
 Interactive browser-based visualization of the GPC (Generative Policy Control) pipeline. A 2-link robot arm navigates around obstacles using a diffusion policy, a learned world model, and closed-loop replanning.
 
-The frontend now prefers a browser-side planner runtime backed by `gpc-wasm` and a Web Worker. If the worker or WASM bootstrap is unavailable, it falls back to the existing Rust REST server automatically.
+The frontend now prefers a browser-side planner runtime backed by `gpc-wasm` and a Web Worker. If the worker or WASM bootstrap is unavailable, it falls back to the existing Rust REST server automatically. Both transports support rebuilding the runtime with the same training settings controls, so you can tune the planner and re-run the demo without restarting anything.
 The generated `src/wasm/pkg` artifacts are committed so a clean `npm ci && npm run build` works without a separate wasm bootstrap step.
 
 ## Architecture
@@ -26,6 +26,7 @@ When the app falls back to the native server, it polls for readiness, fetches th
 
 When the browser runtime is available, the app skips the server poll entirely and boots the planner in-process. The status badge in the header shows whether the current session is using `browser / wasm` or `server / rest`.
 Run `npm run build:wasm` only when you intentionally regenerate the Rust-side WASM package.
+The runtime settings card in the control rail edits the build config and rebuilds the active engine in place, then keeps the browser/WASM worker and REST fallback aligned on the same snapshot shape.
 
 ## Running
 

@@ -1,5 +1,100 @@
 use serde::{Deserialize, Serialize};
 
+use gpc_core::{GpcError, Result};
+
+use crate::arena::PRED_HORIZON;
+
+/// Runtime training and bootstrap configuration for the WASM demo engine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeBuildConfig {
+    pub dataset_seed: u64,
+    pub dataset_episodes: usize,
+    pub episode_length: usize,
+    pub world_phase1_epochs: usize,
+    pub world_phase2_epochs: usize,
+    pub policy_epochs: usize,
+    pub batch_size: usize,
+    pub recommended_candidates: usize,
+    pub recommended_opt_steps: usize,
+}
+
+impl Default for RuntimeBuildConfig {
+    fn default() -> Self {
+        Self {
+            dataset_seed: 42,
+            dataset_episodes: 72,
+            episode_length: 14,
+            world_phase1_epochs: 12,
+            world_phase2_epochs: 8,
+            policy_epochs: 16,
+            batch_size: 24,
+            recommended_candidates: 18,
+            recommended_opt_steps: 2,
+        }
+    }
+}
+
+impl RuntimeBuildConfig {
+    /// Validate the runtime configuration before training begins.
+    pub fn validate(&self) -> Result<()> {
+        if self.dataset_episodes == 0 {
+            return Err(GpcError::Config(
+                "dataset_episodes must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.episode_length == 0 {
+            return Err(GpcError::Config(
+                "episode_length must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.episode_length <= PRED_HORIZON {
+            return Err(GpcError::Config(format!(
+                "episode_length must be greater than PRED_HORIZON ({PRED_HORIZON})"
+            )));
+        }
+
+        if self.batch_size == 0 {
+            return Err(GpcError::Config(
+                "batch_size must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.world_phase1_epochs == 0 {
+            return Err(GpcError::Config(
+                "world_phase1_epochs must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.world_phase2_epochs == 0 {
+            return Err(GpcError::Config(
+                "world_phase2_epochs must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.policy_epochs == 0 {
+            return Err(GpcError::Config(
+                "policy_epochs must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.recommended_opt_steps == 0 {
+            return Err(GpcError::Config(
+                "recommended_opt_steps must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.recommended_candidates == 0 {
+            return Err(GpcError::Config(
+                "recommended_candidates must be greater than zero".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Vec2 {
     pub x: f32,
@@ -134,6 +229,7 @@ pub struct RuntimeOverview {
     pub policy_loss_curve: Vec<f32>,
     pub recommended_candidates: usize,
     pub recommended_opt_steps: usize,
+    pub build_config: RuntimeBuildConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

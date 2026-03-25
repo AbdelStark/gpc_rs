@@ -8,7 +8,7 @@ use burn::module::AutodiffModule;
 use burn::optim::{AdamWConfig, Optimizer};
 use burn::prelude::*;
 use burn::tensor::Distribution;
-use serde_wasm_bindgen::to_value;
+use serde_wasm_bindgen::{from_value, to_value};
 use wasm_bindgen::prelude::*;
 
 use gpc_core::config::{NoiseScheduleConfig, PolicyConfig};
@@ -25,8 +25,8 @@ use crate::arena::{
 };
 use crate::dataset::DemoDataset;
 use crate::types::{
-    CandidateSummary, MissionPlayback, MissionSpec, MissionSummary, PlanningFrame, RuntimeOverview,
-    RuntimeSnapshot, Vec2,
+    CandidateSummary, MissionPlayback, MissionSpec, MissionSummary, PlanningFrame,
+    RuntimeBuildConfig, RuntimeOverview, RuntimeSnapshot, Vec2,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,35 +39,6 @@ type InferBackend = NdArray;
 
 const TOP_CANDIDATES: usize = 7;
 const GOAL_SUCCESS_THRESHOLD: f32 = 0.1;
-
-#[derive(Clone, Debug)]
-struct BuildConfig {
-    dataset_seed: u64,
-    dataset_episodes: usize,
-    episode_length: usize,
-    world_phase1_epochs: usize,
-    world_phase2_epochs: usize,
-    policy_epochs: usize,
-    batch_size: usize,
-    recommended_candidates: usize,
-    recommended_opt_steps: usize,
-}
-
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            dataset_seed: 42,
-            dataset_episodes: 72,
-            episode_length: 14,
-            world_phase1_epochs: 12,
-            world_phase2_epochs: 8,
-            policy_epochs: 16,
-            batch_size: 24,
-            recommended_candidates: 18,
-            recommended_opt_steps: 2,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 struct ArenaReward;
@@ -123,7 +94,8 @@ struct Engine {
 }
 
 impl Engine {
-    fn bootstrap(config: BuildConfig) -> gpc_core::Result<Self> {
+    fn bootstrap(config: RuntimeBuildConfig) -> gpc_core::Result<Self> {
+        config.validate()?;
         let started = Instant::now();
         let train_device = <TrainBackend as Backend>::Device::default();
         let dataset = build_training_dataset(
@@ -148,6 +120,7 @@ impl Engine {
             policy_loss_curve,
             recommended_candidates: config.recommended_candidates,
             recommended_opt_steps: config.recommended_opt_steps,
+            build_config: config.clone(),
         };
 
         Ok(Self {
@@ -319,7 +292,7 @@ pub struct DemoRuntime {
 impl DemoRuntime {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<DemoRuntime, JsValue> {
-        let engine = Engine::bootstrap(BuildConfig::default())
+        let engine = Engine::bootstrap(RuntimeBuildConfig::default())
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         Ok(Self { engine })
     }
@@ -340,6 +313,15 @@ impl DemoRuntime {
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         to_value(&playback).map_err(into_js_error)
     }
+
+    pub fn rebuild(&mut self, config: JsValue) -> Result<JsValue, JsValue> {
+        let config: RuntimeBuildConfig = from_value(config).map_err(into_js_error)?;
+        let engine =
+            Engine::bootstrap(config).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let snapshot = engine.snapshot();
+        self.engine = engine;
+        to_value(&snapshot).map_err(into_js_error)
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
@@ -350,7 +332,7 @@ pub fn init() {
 fn train_world_model(
     dataset: &DemoDataset,
     device: &<TrainBackend as Backend>::Device,
-    config: &BuildConfig,
+    config: &RuntimeBuildConfig,
 ) -> gpc_core::Result<(gpc_world::StateWorldModel<InferBackend>, Vec<f32>)> {
     let model_config = StateWorldModelConfig {
         state_dim: STATE_DIM,
@@ -365,6 +347,10 @@ fn train_world_model(
 
     let samples = dataset.world_model_samples();
     let batch_size = config.batch_size.min(samples.len());
+    debug_assert!(
+        batch_size > 0,
+        "validated build config guarantees non-empty batches"
+    );
 
     for _epoch in 0..config.world_phase1_epochs {
         let mut epoch_loss = 0.0_f32;
@@ -412,6 +398,10 @@ fn train_world_model(
     let state_dim = STATE_DIM;
     let action_dim = ACTION_DIM;
     let batch_size = config.batch_size.min(sequences.len());
+    debug_assert!(
+        batch_size > 0,
+        "validated build config guarantees non-empty batches"
+    );
 
     for _epoch in 0..config.world_phase2_epochs {
         let mut epoch_loss = 0.0_f32;
@@ -465,7 +455,7 @@ fn train_world_model(
 fn train_policy(
     dataset: &DemoDataset,
     device: &<TrainBackend as Backend>::Device,
-    config: &BuildConfig,
+    config: &RuntimeBuildConfig,
 ) -> gpc_core::Result<(DiffusionPolicy<InferBackend>, Vec<f32>)> {
     let schedule_config = NoiseScheduleConfig {
         num_timesteps: 24,
@@ -491,6 +481,10 @@ fn train_policy(
 
     let samples = dataset.policy_samples();
     let batch_size = config.batch_size.min(samples.len());
+    debug_assert!(
+        batch_size > 0,
+        "validated build config guarantees non-empty batches"
+    );
     let mut losses = Vec::with_capacity(config.policy_epochs);
 
     for _epoch in 0..config.policy_epochs {
@@ -730,4 +724,97 @@ fn tensor_to_vec<const D: usize, B: Backend>(tensor: Tensor<B, D>) -> gpc_core::
 
 fn into_js_error(error: serde_wasm_bindgen::Error) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_build_config_validation_rejects_zero_sizes() {
+        let config = RuntimeBuildConfig {
+            batch_size: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("batch_size")
+        ));
+
+        let config = RuntimeBuildConfig {
+            dataset_episodes: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("dataset_episodes")
+        ));
+
+        let config = RuntimeBuildConfig {
+            episode_length: crate::arena::PRED_HORIZON,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("episode_length")
+        ));
+
+        let config = RuntimeBuildConfig {
+            world_phase1_epochs: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("world_phase1_epochs")
+        ));
+
+        let config = RuntimeBuildConfig {
+            world_phase2_epochs: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("world_phase2_epochs")
+        ));
+
+        let config = RuntimeBuildConfig {
+            policy_epochs: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("policy_epochs")
+        ));
+
+        let config = RuntimeBuildConfig {
+            recommended_opt_steps: 0,
+            ..RuntimeBuildConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(gpc_core::GpcError::Config(message)) if message.contains("recommended_opt_steps")
+        ));
+    }
+
+    #[test]
+    fn bootstrap_snapshot_carries_active_build_config() {
+        let config = RuntimeBuildConfig {
+            dataset_seed: 7,
+            dataset_episodes: 4,
+            episode_length: 8,
+            world_phase1_epochs: 1,
+            world_phase2_epochs: 1,
+            policy_epochs: 1,
+            batch_size: 2,
+            recommended_candidates: 3,
+            recommended_opt_steps: 4,
+        };
+
+        let engine = Engine::bootstrap(config.clone()).expect("bootstrap should succeed");
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.overview.build_config, config);
+        assert_eq!(snapshot.overview.recommended_candidates, 3);
+        assert_eq!(snapshot.overview.recommended_opt_steps, 4);
+    }
 }
