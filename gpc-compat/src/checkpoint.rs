@@ -1,4 +1,4 @@
-//! Checkpoint save/load for Burn models.
+//! Checkpoint save/load plus inspection and verification utilities for Burn models.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use gpc_core::config::{PolicyConfig, WorldModelConfig};
 
 /// Supported checkpoint formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CheckpointFormat {
     /// Bincode `.bin` checkpoints.
     Bin,
@@ -21,6 +22,14 @@ pub enum CheckpointFormat {
 impl CheckpointFormat {
     /// Extension used by the format.
     pub fn extension(self) -> &'static str {
+        match self {
+            Self::Bin => "bin",
+            Self::Mpk => "mpk",
+        }
+    }
+
+    /// Human-readable label for the format.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Bin => "bin",
             Self::Mpk => "mpk",
@@ -46,7 +55,8 @@ impl CheckpointFormat {
 }
 
 /// Known checkpoint model kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckpointKind {
     /// Diffusion policy checkpoint.
     Policy,
@@ -99,6 +109,82 @@ pub struct CheckpointArtifact {
     pub checkpoint_path: PathBuf,
     /// Metadata sidecar path.
     pub metadata_path: PathBuf,
+}
+
+/// Parsed configuration embedded in checkpoint metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "config", rename_all = "snake_case")]
+pub enum CheckpointConfigSummary {
+    /// Diffusion policy checkpoint configuration.
+    Policy(PolicyConfig),
+    /// World model checkpoint configuration.
+    WorldModel(WorldModelConfig),
+}
+
+impl CheckpointConfigSummary {
+    /// Describe the key configuration fields in a human-readable form.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Policy(config) => format!(
+                "obs_dim={} action_dim={} obs_horizon={} pred_horizon={} hidden_dim={} num_res_blocks={} diffusion_steps={}",
+                config.obs_dim,
+                config.action_dim,
+                config.obs_horizon,
+                config.pred_horizon,
+                config.hidden_dim,
+                config.num_res_blocks,
+                config.noise_schedule.num_timesteps
+            ),
+            Self::WorldModel(config) => format!(
+                "state_dim={} action_dim={} hidden_dim={} num_layers={} dropout={:.4}",
+                config.state_dim,
+                config.action_dim,
+                config.hidden_dim,
+                config.num_layers,
+                config.dropout
+            ),
+        }
+    }
+}
+
+/// Non-destructive inspection data for a checkpoint artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointInspectionReport {
+    /// Normalized path to the checkpoint file.
+    pub checkpoint_path: PathBuf,
+    /// Path to the metadata sidecar.
+    pub metadata_path: PathBuf,
+    /// Whether the checkpoint file exists.
+    pub checkpoint_exists: bool,
+    /// Whether the metadata sidecar exists.
+    pub metadata_exists: bool,
+    /// Size of the checkpoint file in bytes, when present.
+    pub checkpoint_size_bytes: Option<u64>,
+    /// Size of the metadata file in bytes, when present.
+    pub metadata_size_bytes: Option<u64>,
+    /// Detected checkpoint serialization format.
+    pub format: Option<CheckpointFormat>,
+    /// Parsed metadata, when available and well-formed.
+    pub metadata: Option<CheckpointMetadata>,
+    /// Parsed checkpoint model kind, when available.
+    pub kind: Option<CheckpointKind>,
+    /// Parsed and validated config summary, when available.
+    pub config: Option<CheckpointConfigSummary>,
+    /// Inspection issues found while parsing or validating the artifact.
+    pub issues: Vec<String>,
+}
+
+impl CheckpointInspectionReport {
+    /// Whether the checkpoint has the metadata and config information required for loading.
+    pub fn is_structurally_complete(&self) -> bool {
+        self.checkpoint_exists
+            && self.metadata_exists
+            && self.format.is_some()
+            && self.metadata.is_some()
+            && self.kind.is_some()
+            && self.config.is_some()
+            && self.issues.is_empty()
+    }
 }
 
 impl CheckpointArtifact {
@@ -264,6 +350,151 @@ pub fn checkpoint_path(path: &Path) -> PathBuf {
 pub fn metadata_path_for(path: &Path) -> PathBuf {
     let checkpoint_path = checkpoint_path(path);
     checkpoint_path.with_extension("meta.json")
+}
+
+/// Inspect a checkpoint artifact without attempting to load model weights.
+pub fn inspect_checkpoint_artifact(path: &Path) -> CheckpointInspectionReport {
+    let checkpoint_path = checkpoint_path(path);
+    let metadata_path = metadata_path_for(&checkpoint_path);
+    let checkpoint_exists = checkpoint_path.exists();
+    let metadata_exists = metadata_path.exists();
+    let checkpoint_size_bytes = file_size(&checkpoint_path);
+    let metadata_size_bytes = file_size(&metadata_path);
+    let format = CheckpointFormat::from_path(&checkpoint_path);
+
+    let mut issues = Vec::new();
+    if !checkpoint_exists {
+        issues.push(format!(
+            "checkpoint file not found: {}",
+            checkpoint_path.display()
+        ));
+    }
+    if checkpoint_exists && format.is_none() {
+        issues.push(format!(
+            "unsupported checkpoint extension: {}",
+            checkpoint_path.display()
+        ));
+    }
+    if !metadata_exists {
+        issues.push(format!(
+            "metadata sidecar not found: {}",
+            metadata_path.display()
+        ));
+    }
+
+    let metadata = if metadata_exists {
+        match std::fs::read_to_string(&metadata_path) {
+            Ok(data) => match serde_json::from_str::<CheckpointMetadata>(&data) {
+                Ok(metadata) => Some(metadata),
+                Err(err) => {
+                    issues.push(format!(
+                        "failed to parse metadata {}: {err}",
+                        metadata_path.display()
+                    ));
+                    None
+                }
+            },
+            Err(err) => {
+                issues.push(format!(
+                    "failed to read metadata {}: {err}",
+                    metadata_path.display()
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let kind =
+        metadata
+            .as_ref()
+            .and_then(|metadata| match CheckpointKind::from_metadata(metadata) {
+                Ok(kind) => Some(kind),
+                Err(err) => {
+                    issues.push(err.to_string());
+                    None
+                }
+            });
+
+    let config =
+        metadata.as_ref().zip(kind).and_then(|(metadata, kind)| {
+            match parse_config_summary(kind, &metadata.config_json) {
+                Ok(config) => Some(config),
+                Err(err) => {
+                    issues.push(err.to_string());
+                    None
+                }
+            }
+        });
+
+    CheckpointInspectionReport {
+        checkpoint_path,
+        metadata_path,
+        checkpoint_exists,
+        metadata_exists,
+        checkpoint_size_bytes,
+        metadata_size_bytes,
+        format,
+        metadata,
+        kind,
+        config,
+        issues,
+    }
+}
+
+/// Verify that a checkpoint artifact is structurally sound and that Burn can reload it.
+pub fn verify_checkpoint_artifact<B: Backend>(
+    path: &Path,
+    device: &B::Device,
+) -> gpc_core::Result<CheckpointInspectionReport> {
+    let report = inspect_checkpoint_artifact(path);
+    if !report.is_structurally_complete() {
+        return Err(gpc_core::GpcError::Checkpoint(format!(
+            "checkpoint verification failed for {}: {}",
+            report.checkpoint_path.display(),
+            report.issues.join("; ")
+        )));
+    }
+
+    match report.kind {
+        Some(CheckpointKind::Policy) => {
+            let _ = load_policy_checkpoint::<B>(&report.checkpoint_path, device)?;
+        }
+        Some(CheckpointKind::WorldModel) => {
+            let _ = load_world_model_checkpoint::<B>(&report.checkpoint_path, device)?;
+        }
+        None => {
+            return Err(gpc_core::GpcError::Checkpoint(format!(
+                "checkpoint verification failed for {}: missing checkpoint kind",
+                report.checkpoint_path.display()
+            )));
+        }
+    }
+
+    Ok(report)
+}
+
+fn parse_config_summary(
+    kind: CheckpointKind,
+    config_json: &str,
+) -> gpc_core::Result<CheckpointConfigSummary> {
+    match kind {
+        CheckpointKind::Policy => {
+            let config: PolicyConfig = serde_json::from_str(config_json)?;
+            config.validate()?;
+            Ok(CheckpointConfigSummary::Policy(config))
+        }
+        CheckpointKind::WorldModel => {
+            let config: WorldModelConfig = serde_json::from_str(config_json)?;
+            config.validate()?;
+            Ok(CheckpointConfigSummary::WorldModel(config))
+        }
+    }
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
 fn save_module<B, M>(
@@ -455,6 +686,124 @@ mod tests {
 
         let loaded_meta = load_metadata(&path).unwrap();
         assert_eq!(loaded_meta.epoch, 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_inspect_policy_checkpoint_reports_config_summary() {
+        let device = <TestBackend as Backend>::Device::default();
+        let base_dir = std::env::temp_dir().join(format!(
+            "gpc_policy_inspect_{}_{}",
+            std::process::id(),
+            "summary"
+        ));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        std::fs::create_dir_all(&base_dir).unwrap();
+
+        let config = gpc_policy::DiffusionPolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            hidden_dim: 16,
+            time_embed_dim: 8,
+            num_res_blocks: 1,
+            diffusion_steps: 4,
+            beta_start: 1e-4,
+            beta_end: 0.02,
+        };
+        let model = config.init::<TestBackend>(&device);
+        let metadata_config = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            action_horizon: 1,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            noise_schedule: gpc_core::config::NoiseScheduleConfig {
+                num_timesteps: 4,
+                beta_start: 1e-4,
+                beta_end: 0.02,
+            },
+        };
+
+        let artifact = save_policy_checkpoint(
+            model,
+            &policy_metadata(&metadata_config),
+            base_dir.join("policy_inspect"),
+            CheckpointFormat::Bin,
+        )
+        .unwrap();
+
+        let report = inspect_checkpoint_artifact(&artifact.checkpoint_path);
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        assert!(report.is_structurally_complete());
+        assert_eq!(report.kind, Some(CheckpointKind::Policy));
+        assert_eq!(report.format, Some(CheckpointFormat::Bin));
+        match report.config {
+            Some(CheckpointConfigSummary::Policy(config)) => {
+                assert_eq!(config.obs_dim, 4);
+                assert_eq!(config.pred_horizon, 4);
+            }
+            other => panic!("expected policy config summary, found {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_verify_checkpoint_rejects_invalid_config_metadata() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpc_checkpoint_invalid_meta_{}_{}",
+            std::process::id(),
+            "config"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let checkpoint_path = dir.join("broken_policy.bin");
+        std::fs::write(&checkpoint_path, b"weights").unwrap();
+        std::fs::write(
+            dir.join("broken_policy.meta.json"),
+            serde_json::json!({
+                "model_type": "policy",
+                "epoch": 1,
+                "loss": 0.5,
+                "timestamp": "2026-03-25T00:00:00Z",
+                "config_json": serde_json::to_string(&PolicyConfig {
+                    obs_dim: 0,
+                    action_dim: 2,
+                    obs_horizon: 2,
+                    pred_horizon: 4,
+                    action_horizon: 1,
+                    hidden_dim: 16,
+                    num_res_blocks: 1,
+                    noise_schedule: gpc_core::config::NoiseScheduleConfig {
+                        num_timesteps: 4,
+                        beta_start: 1e-4,
+                        beta_end: 0.02,
+                    },
+                })
+                .unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = inspect_checkpoint_artifact(&checkpoint_path);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("obs_dim must be > 0"))
+        );
+
+        let device = <TestBackend as Backend>::Device::default();
+        let err = verify_checkpoint_artifact::<TestBackend>(&checkpoint_path, &device)
+            .expect_err("invalid config should fail verification");
+        assert!(err.to_string().contains("obs_dim must be > 0"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

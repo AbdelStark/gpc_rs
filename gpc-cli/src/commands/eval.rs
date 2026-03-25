@@ -1,6 +1,6 @@
 //! Eval command implementation.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use burn::backend::Autodiff;
@@ -17,7 +17,7 @@ use gpc_core::config::{GpcConfig, PolicyConfig, WorldModelConfig};
 use gpc_core::traits::{Evaluator, Policy, RewardFunction, WorldModel};
 use gpc_eval::{AutodiffGpcOptBuilder, GpcRankBuilder};
 use gpc_policy::DiffusionPolicyConfig;
-use gpc_train::data::Episode;
+use gpc_train::{Episode, load_episodes_from_path, validate_episodes};
 use gpc_world::reward::L2RewardFunctionConfig;
 use gpc_world::world_model::StateWorldModelConfig;
 
@@ -532,8 +532,17 @@ pub(crate) fn load_evaluation_windows(
     args: &EvalArgs,
     models: &LoadedModels<EvalBackend>,
 ) -> Result<Vec<EvaluationWindow>> {
-    let episodes = load_episodes_from_path(args.data.as_deref().context("missing data path")?)?;
-    validate_episodes_for_evaluation(&episodes, &models.policy_config, &models.world_model_config)?;
+    let data_path = args.data.as_deref().context("missing data path")?;
+    let episodes = load_episodes_from_path(data_path)?;
+    let validation_report =
+        validate_episodes(&episodes, &models.policy_config, &models.world_model_config)?;
+
+    if validation_report.episode_count == 0 {
+        anyhow::bail!("dataset does not contain any episodes");
+    }
+    if !validation_report.has_usable_open_loop_windows() {
+        anyhow::bail!("dataset does not contain any usable evaluation windows");
+    }
 
     let windows = build_windows(
         &episodes,
@@ -565,11 +574,11 @@ pub(crate) fn load_synthetic_episodes(
         args.seed.unwrap_or(default_seed),
     );
 
-    validate_episodes_for_closed_loop(
-        &episodes,
-        &models.policy_config,
-        &models.world_model_config,
-    )?;
+    let validation_report =
+        validate_episodes(&episodes, &models.policy_config, &models.world_model_config)?;
+    if !validation_report.is_closed_loop_compatible() {
+        anyhow::bail!("synthetic evaluation episodes are not structurally compatible");
+    }
 
     Ok(episodes)
 }
@@ -1079,21 +1088,6 @@ fn run_eval_demo(config: &GpcConfig, args: &EvalArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_episodes_from_path(path: &str) -> Result<Vec<Episode>> {
-    let path = Path::new(path);
-    let json_path = if path.is_file() {
-        path.to_path_buf()
-    } else {
-        path.join("episodes.json")
-    };
-
-    let data = std::fs::read_to_string(&json_path)
-        .with_context(|| format!("failed to read dataset from {}", json_path.display()))?;
-    let episodes = serde_json::from_str(&data)
-        .with_context(|| format!("failed to parse episodes from {}", json_path.display()))?;
-    Ok(episodes)
-}
-
 pub(crate) fn generate_synthetic_episodes(
     state_dim: usize,
     action_dim: usize,
@@ -1205,125 +1199,6 @@ fn build_windows(
     }
 
     Ok(windows)
-}
-
-fn validate_episodes_for_evaluation(
-    episodes: &[Episode],
-    policy_config: &PolicyConfig,
-    world_model_config: &WorldModelConfig,
-) -> Result<()> {
-    if episodes.is_empty() {
-        anyhow::bail!("dataset does not contain any episodes");
-    }
-
-    let mut usable_windows = 0usize;
-    for (episode_index, episode) in episodes.iter().enumerate() {
-        validate_episode(episode, episode_index, policy_config, world_model_config)?;
-        if episode.states.len() > policy_config.pred_horizon {
-            usable_windows += episode.states.len() - policy_config.pred_horizon;
-        }
-    }
-
-    if usable_windows == 0 {
-        anyhow::bail!("dataset does not contain any usable evaluation windows");
-    }
-
-    Ok(())
-}
-
-pub(crate) fn validate_episodes_for_closed_loop(
-    episodes: &[Episode],
-    policy_config: &PolicyConfig,
-    world_model_config: &WorldModelConfig,
-) -> Result<()> {
-    if episodes.is_empty() {
-        anyhow::bail!("synthetic evaluation did not generate any episodes");
-    }
-
-    for (episode_index, episode) in episodes.iter().enumerate() {
-        validate_episode(episode, episode_index, policy_config, world_model_config)?;
-    }
-
-    Ok(())
-}
-
-fn validate_episode(
-    episode: &Episode,
-    episode_index: usize,
-    policy_config: &PolicyConfig,
-    world_model_config: &WorldModelConfig,
-) -> Result<()> {
-    let state_dim = episode
-        .states
-        .first()
-        .map(|state| state.len())
-        .with_context(|| format!("episode {episode_index} is missing state samples"))?;
-    let action_dim = episode
-        .actions
-        .first()
-        .map(|action| action.len())
-        .with_context(|| format!("episode {episode_index} is missing action samples"))?;
-    let obs_dim = episode
-        .observations
-        .first()
-        .map(|obs| obs.len())
-        .with_context(|| format!("episode {episode_index} is missing observation samples"))?;
-
-    if state_dim != world_model_config.state_dim {
-        anyhow::bail!(
-            "episode {episode_index} state dimension mismatch: dataset={} checkpoint={}",
-            state_dim,
-            world_model_config.state_dim
-        );
-    }
-    if action_dim != policy_config.action_dim || action_dim != world_model_config.action_dim {
-        anyhow::bail!(
-            "episode {episode_index} action dimension mismatch: dataset={} policy={} world_model={}",
-            action_dim,
-            policy_config.action_dim,
-            world_model_config.action_dim
-        );
-    }
-    if obs_dim != policy_config.obs_dim {
-        anyhow::bail!(
-            "episode {episode_index} observation dimension mismatch: dataset={} checkpoint={}",
-            obs_dim,
-            policy_config.obs_dim
-        );
-    }
-    if episode.states.len() != episode.observations.len() {
-        anyhow::bail!(
-            "episode {episode_index} must have the same number of states and observations"
-        );
-    }
-    if episode.states.len() != episode.actions.len() + 1 {
-        anyhow::bail!("episode {episode_index} must contain exactly one more state than action");
-    }
-
-    validate_sequence_shapes(&episode.states, state_dim, "state", episode_index)?;
-    validate_sequence_shapes(&episode.observations, obs_dim, "observation", episode_index)?;
-    validate_sequence_shapes(&episode.actions, action_dim, "action", episode_index)?;
-
-    Ok(())
-}
-
-fn validate_sequence_shapes(
-    rows: &[Vec<f32>],
-    expected_dim: usize,
-    label: &str,
-    episode_index: usize,
-) -> Result<()> {
-    for (row_index, row) in rows.iter().enumerate() {
-        if row.len() != expected_dim {
-            anyhow::bail!(
-                "episode {episode_index} {label} {row_index} has dimension {} but expected {}",
-                row.len(),
-                expected_dim
-            );
-        }
-    }
-
-    Ok(())
 }
 
 fn build_obs_history(
@@ -1542,6 +1417,7 @@ mod tests {
     };
     use gpc_core::config::TrainingConfig;
     use gpc_train::{PolicyTrainer, WorldModelTrainer};
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_eval_dir(name: &str) -> PathBuf {
@@ -2307,7 +2183,7 @@ mod tests {
             observations: vec![vec![0.0; 4]],
         }];
 
-        let err = validate_episodes_for_evaluation(&malformed, &policy_config, &world_model_config)
+        let err = validate_episodes(&malformed, &policy_config, &world_model_config)
             .expect_err("malformed dataset should be rejected");
         assert!(
             err.to_string()

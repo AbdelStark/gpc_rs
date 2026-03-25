@@ -15,9 +15,10 @@ use super::eval::{
     CheckpointEvalSettings, EvalArgs, EvaluationMode, EvaluationReport, EvaluationStrategy,
     evaluate_synthetic_closed_loop, evaluate_windows, generate_synthetic_episodes,
     load_evaluation_windows, load_models, resolved_policy_checkpoint_path,
-    resolved_world_model_checkpoint_path, validate_episodes_for_closed_loop,
+    resolved_world_model_checkpoint_path,
 };
 use super::reporting::{read_json_report, write_json_report};
+use gpc_train::validate_episodes;
 
 type BenchmarkBackend = Autodiff<NdArray>;
 
@@ -415,11 +416,14 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
                     episodes_per_seed,
                     seed,
                 );
-                validate_episodes_for_closed_loop(
+                let validation_report = validate_episodes(
                     &episodes,
                     &models.policy_config,
                     &models.world_model_config,
                 )?;
+                if !validation_report.is_closed_loop_compatible() {
+                    anyhow::bail!("synthetic benchmark episodes are not structurally compatible");
+                }
 
                 for strategy in &strategies {
                     let report = evaluate_synthetic_closed_loop(

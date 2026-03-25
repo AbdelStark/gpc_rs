@@ -9,15 +9,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpc_core::config::{GpcConfig, PolicyConfig, TrainingConfig, WorldModelConfig};
-use gpc_train::data::{GpcDataset, GpcDatasetConfig};
 use gpc_train::{
-    PolicyTrainer, PolicyValidationSummary, WorldModelTrainer, WorldModelValidationSummary,
+    GpcDataset, GpcDatasetConfig, PolicyTrainer, PolicyValidationSummary, WorldModelTrainer,
+    WorldModelValidationSummary,
 };
 
 use super::reporting::{default_train_report_path, write_json_report};
 use gpc_compat::{
     CheckpointArtifact, CheckpointFormat, CheckpointKind, CheckpointMetadata,
-    save_policy_checkpoint, save_world_model_checkpoint,
+    save_policy_checkpoint, save_world_model_checkpoint, verify_checkpoint_artifact,
 };
 
 type TrainBackend = Autodiff<NdArray>;
@@ -203,12 +203,31 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         tracing::info!("Generating synthetic dataset");
         GpcDataset::generate_synthetic(dataset_config.clone(), 50, 100, training_config.seed)
     } else if let Some(data_path) = &args.data {
-        let json_path = format!("{data_path}/episodes.json");
-        GpcDataset::from_json(&json_path, dataset_config.clone())?
+        GpcDataset::from_path(data_path, dataset_config.clone())?
     } else {
         tracing::info!("No data path specified, using synthetic data");
         GpcDataset::generate_synthetic(dataset_config.clone(), 50, 100, training_config.seed)
     };
+
+    let validation_report = dataset.validate(&config.policy, &config.world_model)?;
+    tracing::info!(
+        episodes = validation_report.episode_count,
+        transitions = validation_report.transition_count,
+        open_loop_windows = validation_report.open_loop_window_count,
+        closed_loop_compatible_episodes = validation_report.closed_loop_compatible_episode_count,
+        "dataset validated"
+    );
+
+    if validation_report.episode_count == 0 {
+        anyhow::bail!("dataset does not contain any episodes");
+    }
+
+    let trains_world_model = matches!(args.component.as_str(), "world-model" | "wm" | "all");
+    if trains_world_model && validation_report.open_loop_window_count == 0 {
+        anyhow::bail!(
+            "dataset does not contain any usable open-loop windows for world-model training"
+        );
+    }
 
     tracing::info!(
         "Dataset loaded: {} episodes, {} transitions",
@@ -336,6 +355,7 @@ fn train_world_model(
         world_model_config,
         "world_model_phase1",
         &args.output,
+        device,
     )?;
 
     let phase1_model = if validation_dataset.is_some() {
@@ -357,6 +377,7 @@ fn train_world_model(
         world_model_config,
         "world_model_final",
         &args.output,
+        device,
     )?;
 
     tracing::info!("World model training complete");
@@ -398,7 +419,7 @@ fn train_policy(
     tracing::info!("=== Diffusion policy training ===");
     let summary =
         trainer.train_with_validation_summary::<TrainBackend>(dataset, validation_dataset, device);
-    let artifacts = save_policy_validation_stages(&summary, policy_config, output_dir)?;
+    let artifacts = save_policy_validation_stages(&summary, policy_config, output_dir, device)?;
 
     tracing::info!("Policy training complete");
     Ok((
@@ -420,6 +441,7 @@ fn save_policy_validation_stages(
     summary: &PolicyValidationSummary<TrainBackend>,
     policy_config: &PolicyConfig,
     output_dir: &str,
+    device: &<TrainBackend as burn::prelude::Backend>::Device,
 ) -> Result<Vec<CheckpointArtifact>> {
     let mut artifacts = Vec::new();
     artifacts.push(save_policy_stage(
@@ -430,6 +452,7 @@ fn save_policy_validation_stages(
         output_dir,
         summary.training.final_epoch,
         summary.training.final_loss,
+        device,
     )?);
 
     if summary.best_epoch.is_some() {
@@ -441,6 +464,7 @@ fn save_policy_validation_stages(
             output_dir,
             summary.best_epoch,
             summary.best_validation_loss.or(summary.training.final_loss),
+            device,
         )?);
     } else {
         remove_checkpoint_artifact(&Path::new(output_dir).join("policy_best.bin"))?;
@@ -454,6 +478,7 @@ fn save_world_model_validation_stages(
     world_model_config: &WorldModelConfig,
     base_name: &str,
     output_dir: &str,
+    device: &<TrainBackend as burn::prelude::Backend>::Device,
 ) -> Result<Vec<CheckpointArtifact>> {
     let mut artifacts = Vec::new();
     artifacts.push(save_world_model_stage(
@@ -464,6 +489,7 @@ fn save_world_model_validation_stages(
         output_dir,
         summary.training.final_epoch,
         summary.training.final_loss,
+        device,
     )?);
 
     if summary.best_epoch.is_some() {
@@ -480,6 +506,7 @@ fn save_world_model_validation_stages(
             output_dir,
             summary.best_epoch,
             summary.best_validation_loss.or(summary.training.final_loss),
+            device,
         )?);
     } else if base_name.ends_with("_phase1") {
         remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_phase1_best.bin"))?;
@@ -490,6 +517,7 @@ fn save_world_model_validation_stages(
     Ok(artifacts)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_policy_stage(
     model_type: CheckpointKind,
     model: &gpc_policy::DiffusionPolicy<TrainBackend>,
@@ -498,6 +526,7 @@ fn save_policy_stage(
     output_dir: &str,
     epoch: Option<usize>,
     loss: Option<f32>,
+    device: &<TrainBackend as burn::prelude::Backend>::Device,
 ) -> Result<CheckpointArtifact> {
     let metadata = checkpoint_metadata(
         model_type,
@@ -515,9 +544,15 @@ fn save_policy_stage(
         "Saved policy checkpoint at {}",
         checkpoint.checkpoint_path.display()
     );
+    verify_checkpoint_artifact::<TrainBackend>(&checkpoint.checkpoint_path, device)?;
+    tracing::info!(
+        "Verified policy checkpoint at {}",
+        checkpoint.checkpoint_path.display()
+    );
     Ok(checkpoint)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_world_model_stage(
     model_type: CheckpointKind,
     model: &gpc_world::StateWorldModel<TrainBackend>,
@@ -526,6 +561,7 @@ fn save_world_model_stage(
     output_dir: &str,
     epoch: Option<usize>,
     loss: Option<f32>,
+    device: &<TrainBackend as burn::prelude::Backend>::Device,
 ) -> Result<CheckpointArtifact> {
     let metadata = checkpoint_metadata(
         model_type,
@@ -541,6 +577,11 @@ fn save_world_model_stage(
     )?;
     tracing::info!(
         "Saved world-model checkpoint at {}",
+        checkpoint.checkpoint_path.display()
+    );
+    verify_checkpoint_artifact::<TrainBackend>(&checkpoint.checkpoint_path, device)?;
+    tracing::info!(
+        "Verified world-model checkpoint at {}",
         checkpoint.checkpoint_path.display()
     );
     Ok(checkpoint)
@@ -758,8 +799,11 @@ fn log_artifacts(artifacts: &[CheckpointArtifact]) {
 mod tests {
     use super::*;
     use crate::commands::reporting::{default_train_report_path, write_json_report};
+    use burn::prelude::Backend;
+    use gpc_compat::verify_checkpoint_artifact;
     use gpc_core::config::{NoiseScheduleConfig, PolicyConfig, TrainingConfig, WorldModelConfig};
     use gpc_train::data::Episode;
+    use std::path::Path;
 
     fn temp_train_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -786,6 +830,185 @@ mod tests {
             err.to_string()
                 .contains("validation_split must be in [0.0, 1.0)")
         );
+    }
+
+    #[test]
+    fn run_train_accepts_direct_episodes_file() {
+        let dir = temp_train_dir("direct_file_input");
+        let data_dir = dir.join("data");
+        let output_dir = dir.join("runs");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = gpc_core::config::GpcConfig {
+            policy: PolicyConfig {
+                obs_dim: 4,
+                action_dim: 2,
+                obs_horizon: 2,
+                pred_horizon: 2,
+                action_horizon: 2,
+                hidden_dim: 8,
+                num_res_blocks: 1,
+                noise_schedule: NoiseScheduleConfig {
+                    num_timesteps: 8,
+                    beta_start: 1e-4,
+                    beta_end: 0.02,
+                },
+            },
+            world_model: WorldModelConfig {
+                state_dim: 4,
+                action_dim: 2,
+                hidden_dim: 8,
+                num_layers: 1,
+                dropout: 0.0,
+            },
+            training: TrainingConfig {
+                num_epochs: 1,
+                batch_size: 2,
+                learning_rate: 1e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+                warmup_steps: 0,
+                checkpoint_every: 1,
+                log_every: 1,
+                seed: 7,
+            },
+            ..Default::default()
+        };
+
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let episodes = vec![Episode {
+            states: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.1, 0.0, 0.0],
+            ],
+            actions: vec![vec![0.1, 0.0], vec![0.1, 0.1]],
+            observations: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.1, 0.0, 0.0],
+            ],
+        }];
+        let episodes_path = data_dir.join("episodes.json");
+        std::fs::write(
+            &episodes_path,
+            serde_json::to_string_pretty(&episodes).unwrap(),
+        )
+        .unwrap();
+
+        let report_output = default_train_report_path(&output_dir);
+        let args = TrainArgs {
+            config: Some(config_path.display().to_string()),
+            data: Some(episodes_path.display().to_string()),
+            component: "policy".to_string(),
+            epochs: Some(1),
+            synthetic: false,
+            output: output_dir.display().to_string(),
+            horizon: 2,
+            validation_split: 0.0,
+            report_output: None,
+        };
+
+        run_train(args).unwrap();
+
+        assert!(
+            report_output.exists(),
+            "expected train report to be written"
+        );
+        let report: TrainingReport =
+            serde_json::from_str(&std::fs::read_to_string(&report_output).unwrap()).unwrap();
+        assert_eq!(
+            report.request.data_path.as_deref(),
+            Some(episodes_path.to_str().unwrap())
+        );
+        assert_eq!(report.dataset.total_episodes, 1);
+        assert_eq!(report.dataset.train_episodes, 1);
+        assert_eq!(report.dataset.validation_episodes, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_train_rejects_malformed_dataset_via_shared_loader() {
+        let dir = temp_train_dir("malformed_dataset");
+        let data_dir = dir.join("data");
+        let output_dir = dir.join("runs");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = gpc_core::config::GpcConfig {
+            policy: PolicyConfig {
+                obs_dim: 4,
+                action_dim: 2,
+                obs_horizon: 2,
+                pred_horizon: 2,
+                action_horizon: 2,
+                hidden_dim: 8,
+                num_res_blocks: 1,
+                noise_schedule: NoiseScheduleConfig {
+                    num_timesteps: 8,
+                    beta_start: 1e-4,
+                    beta_end: 0.02,
+                },
+            },
+            world_model: WorldModelConfig {
+                state_dim: 4,
+                action_dim: 2,
+                hidden_dim: 8,
+                num_layers: 1,
+                dropout: 0.0,
+            },
+            training: TrainingConfig {
+                num_epochs: 1,
+                batch_size: 2,
+                learning_rate: 1e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+                warmup_steps: 0,
+                checkpoint_every: 1,
+                log_every: 1,
+                seed: 7,
+            },
+            ..Default::default()
+        };
+
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let malformed = vec![Episode {
+            states: vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.1, 0.0, 0.0, 0.0]],
+            actions: vec![vec![0.1, 0.0]],
+            observations: vec![vec![0.0, 0.0, 0.0]],
+        }];
+        let episodes_path = data_dir.join("episodes.json");
+        std::fs::write(
+            &episodes_path,
+            serde_json::to_string_pretty(&malformed).unwrap(),
+        )
+        .unwrap();
+
+        let args = TrainArgs {
+            config: Some(config_path.display().to_string()),
+            data: Some(episodes_path.display().to_string()),
+            component: "policy".to_string(),
+            epochs: Some(1),
+            synthetic: false,
+            output: output_dir.display().to_string(),
+            horizon: 2,
+            validation_split: 0.0,
+            report_output: None,
+        };
+
+        let err = run_train(args).expect_err("malformed dataset should be rejected");
+        assert!(
+            err.to_string()
+                .contains("must have the same number of states and observations")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1066,6 +1289,14 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.name == "policy_final")
         );
+        let device = <TrainBackend as Backend>::Device::default();
+        for artifact in &report.artifacts {
+            verify_checkpoint_artifact::<TrainBackend>(
+                Path::new(&artifact.checkpoint_path),
+                &device,
+            )
+            .unwrap();
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1203,6 +1434,14 @@ mod tests {
         assert_eq!(report.dataset.total_episodes, 2);
         assert!(report.policy.is_some());
         assert!(report.world_model.is_some());
+        let device = <TrainBackend as Backend>::Device::default();
+        for artifact in &report.artifacts {
+            verify_checkpoint_artifact::<TrainBackend>(
+                Path::new(&artifact.checkpoint_path),
+                &device,
+            )
+            .unwrap();
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
