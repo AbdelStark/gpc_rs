@@ -12,7 +12,7 @@ mod commands;
 enum Cli {
     /// Train the diffusion policy or world model.
     Train(commands::TrainArgs),
-    /// Evaluate trajectories using GPC-RANK or GPC-OPT.
+    /// Evaluate trajectories using policy, GPC-RANK, or GPC-OPT.
     Eval(commands::EvalArgs),
     /// Benchmark checkpoints across policy, GPC-RANK, and GPC-OPT.
     Benchmark(commands::BenchmarkArgs),
