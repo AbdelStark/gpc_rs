@@ -58,6 +58,8 @@ pub struct TrainArgs {
 
 /// Run the train command.
 pub fn run_train(args: TrainArgs) -> Result<()> {
+    validate_validation_split(args.validation_split)?;
+
     let config = if let Some(config_path) = &args.config {
         let data = std::fs::read_to_string(config_path)?;
         serde_json::from_str(&data)?
@@ -100,6 +102,9 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
     );
 
     std::fs::create_dir_all(&args.output)?;
+    if args.validation_split == 0.0 {
+        cleanup_stale_best_artifacts(&args.output, &args.component)?;
+    }
 
     let dataset_split = if args.validation_split > 0.0 {
         Some(dataset.split(args.validation_split, training_config.seed)?)
@@ -269,6 +274,8 @@ fn save_policy_validation_stages(
             summary.best_epoch,
             summary.best_validation_loss.or(summary.training.final_loss),
         )?);
+    } else {
+        remove_checkpoint_artifact(&Path::new(output_dir).join("policy_best.bin"))?;
     }
 
     Ok(artifacts)
@@ -306,6 +313,10 @@ fn save_world_model_validation_stages(
             summary.best_epoch,
             summary.best_validation_loss.or(summary.training.final_loss),
         )?);
+    } else if base_name.ends_with("_phase1") {
+        remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_phase1_best.bin"))?;
+    } else {
+        remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_best.bin"))?;
     }
 
     Ok(artifacts)
@@ -382,6 +393,50 @@ fn checkpoint_metadata(
     }
 }
 
+fn validate_validation_split(validation_split: f32) -> Result<()> {
+    if !(0.0..1.0).contains(&validation_split) {
+        anyhow::bail!("validation_split must be in [0.0, 1.0)");
+    }
+
+    Ok(())
+}
+
+fn cleanup_stale_best_artifacts(output_dir: &str, component: &str) -> Result<()> {
+    match component {
+        "policy" => remove_checkpoint_artifact(&Path::new(output_dir).join("policy_best.bin"))?,
+        "world-model" | "wm" => {
+            remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_phase1_best.bin"))?;
+            remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_best.bin"))?;
+        }
+        "all" => {
+            remove_checkpoint_artifact(&Path::new(output_dir).join("policy_best.bin"))?;
+            remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_phase1_best.bin"))?;
+            remove_checkpoint_artifact(&Path::new(output_dir).join("world_model_best.bin"))?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn remove_checkpoint_artifact(path: &Path) -> Result<()> {
+    let metadata_path = gpc_compat::metadata_path_for(path);
+
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    match std::fs::remove_file(metadata_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(())
+}
+
 fn current_timestamp() -> String {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => format!("{}Z", duration.as_secs()),
@@ -399,5 +454,72 @@ fn log_artifacts(artifacts: &[CheckpointArtifact]) {
     for artifact in artifacts {
         tracing::info!("  - {}", artifact.checkpoint_path.display());
         tracing::info!("    metadata: {}", artifact.metadata_path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_train_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gpc_train_{name}_{}_{}",
+            std::process::id(),
+            test_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_suffix() -> u64 {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs() ^ u64::from(duration.subsec_nanos()),
+            Err(_) => 42,
+        }
+    }
+
+    #[test]
+    fn validation_split_rejects_negative_values() {
+        let err = validate_validation_split(-0.01).expect_err("negative split should be rejected");
+        assert!(
+            err.to_string()
+                .contains("validation_split must be in [0.0, 1.0)")
+        );
+    }
+
+    #[test]
+    fn stale_best_artifacts_are_removed_for_non_validation_runs() {
+        let dir = temp_train_dir("cleanup");
+        let best_paths = [
+            dir.join("policy_best.bin"),
+            dir.join("policy_best.meta.json"),
+            dir.join("world_model_phase1_best.bin"),
+            dir.join("world_model_phase1_best.meta.json"),
+            dir.join("world_model_best.bin"),
+            dir.join("world_model_best.meta.json"),
+        ];
+        let final_paths = [
+            dir.join("policy_final.bin"),
+            dir.join("policy_final.meta.json"),
+        ];
+
+        for path in best_paths.iter().chain(final_paths.iter()) {
+            std::fs::write(path, b"stale").unwrap();
+        }
+
+        cleanup_stale_best_artifacts(dir.to_str().unwrap(), "all").unwrap();
+
+        for path in &best_paths {
+            assert!(
+                !path.exists(),
+                "expected stale artifact to be removed: {path:?}"
+            );
+        }
+        for path in &final_paths {
+            assert!(path.exists(), "expected final artifact to remain: {path:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
