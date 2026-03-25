@@ -183,8 +183,24 @@ impl TrainingConfig {
         if self.batch_size == 0 {
             return Err(GpcError::Config("batch_size must be > 0".into()));
         }
-        if self.learning_rate <= 0.0 {
+        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             return Err(GpcError::Config("learning_rate must be positive".into()));
+        }
+        if !self.weight_decay.is_finite() || self.weight_decay < 0.0 {
+            return Err(GpcError::Config(
+                "weight_decay must be finite and >= 0".into(),
+            ));
+        }
+        if !self.grad_clip_norm.is_finite() || self.grad_clip_norm < 0.0 {
+            return Err(GpcError::Config(
+                "grad_clip_norm must be finite and >= 0".into(),
+            ));
+        }
+        if self.checkpoint_every == 0 {
+            return Err(GpcError::Config("checkpoint_every must be > 0".into()));
+        }
+        if self.log_every == 0 {
+            return Err(GpcError::Config("log_every must be > 0".into()));
         }
         Ok(())
     }
@@ -339,5 +355,53 @@ mod tests {
             ..TrainingConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_training_config_validation_rejects_invalid_optimizer_settings() {
+        let negative_weight_decay = TrainingConfig {
+            weight_decay: -1e-6,
+            ..TrainingConfig::default()
+        };
+        assert!(negative_weight_decay.validate().is_err());
+
+        let invalid_learning_rate = TrainingConfig {
+            learning_rate: f64::NAN,
+            ..TrainingConfig::default()
+        };
+        assert!(invalid_learning_rate.validate().is_err());
+
+        let invalid_grad_clip_norm = TrainingConfig {
+            grad_clip_norm: -0.1,
+            ..TrainingConfig::default()
+        };
+        assert!(invalid_grad_clip_norm.validate().is_err());
+    }
+
+    #[test]
+    fn test_training_config_validation_rejects_zero_schedule_intervals() {
+        let zero_checkpoint_every = TrainingConfig {
+            checkpoint_every: 0,
+            ..TrainingConfig::default()
+        };
+        assert!(zero_checkpoint_every.validate().is_err());
+
+        let zero_log_every = TrainingConfig {
+            log_every: 0,
+            ..TrainingConfig::default()
+        };
+        assert!(zero_log_every.validate().is_err());
+    }
+
+    #[test]
+    fn test_training_config_validation_allows_disabled_warmup_and_clipping() {
+        let config = TrainingConfig {
+            warmup_steps: 0,
+            grad_clip_norm: 0.0,
+            ..TrainingConfig::default()
+        };
+        config
+            .validate()
+            .expect("zero warmup and clipping should remain valid");
     }
 }
