@@ -217,6 +217,17 @@ struct BenchmarkRegressionThresholds {
 #[derive(Debug, Deserialize)]
 struct LoadedBenchmarkReport {
     mode: String,
+    checkpoint_dir: String,
+    policy_checkpoint: Option<String>,
+    world_model_checkpoint: Option<String>,
+    data: Option<String>,
+    strategies: Vec<String>,
+    seeds: Vec<u64>,
+    episodes_per_seed: usize,
+    episode_length: usize,
+    num_candidates: usize,
+    opt_steps: usize,
+    opt_learning_rate: f32,
     summary: Vec<LoadedBenchmarkSummary>,
 }
 
@@ -339,7 +350,10 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
         GpcConfig::default()
     };
 
-    if has_regression_thresholds(&args) && args.baseline.is_none() {
+    let thresholds = regression_thresholds(&args);
+    validate_threshold_values(&thresholds)?;
+
+    if !thresholds.is_empty() && args.baseline.is_none() {
         anyhow::bail!("regression thresholds require --baseline");
     }
 
@@ -445,16 +459,7 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     }
 
     let summary = summarize_runs(&per_run);
-    let comparison = match &args.baseline {
-        Some(baseline_path) => Some(compare_against_baseline(
-            baseline_path,
-            mode,
-            &summary,
-            &args,
-        )?),
-        None => None,
-    };
-    let report = BenchmarkReport {
+    let mut report = BenchmarkReport {
         mode,
         checkpoint_dir: args.checkpoint_dir.clone(),
         policy_checkpoint: Some(
@@ -477,8 +482,16 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
         opt_learning_rate,
         per_run,
         summary,
-        comparison,
+        comparison: None,
     };
+
+    if let Some(baseline_path) = &args.baseline {
+        report.comparison = Some(compare_against_baseline(
+            baseline_path,
+            &report,
+            &thresholds,
+        )?);
+    }
 
     validate_benchmark_regressions(&report)?;
 
@@ -566,14 +579,6 @@ fn summarize_runs(runs: &[BenchmarkRun]) -> Vec<BenchmarkSummary> {
     summary
 }
 
-fn has_regression_thresholds(args: &BenchmarkArgs) -> bool {
-    args.max_rollout_mse_increase.is_some()
-        || args.max_terminal_distance_increase.is_some()
-        || args.max_action_mse_increase.is_some()
-        || args.max_reward_drop.is_some()
-        || args.max_success_rate_drop.is_some()
-}
-
 fn regression_thresholds(args: &BenchmarkArgs) -> BenchmarkRegressionThresholds {
     BenchmarkRegressionThresholds {
         max_rollout_mse_increase: args.max_rollout_mse_increase,
@@ -586,26 +591,21 @@ fn regression_thresholds(args: &BenchmarkArgs) -> BenchmarkRegressionThresholds 
 
 fn compare_against_baseline(
     baseline_path: &str,
-    current_mode: EvaluationMode,
-    current_summary: &[BenchmarkSummary],
-    args: &BenchmarkArgs,
+    current: &BenchmarkReport,
+    thresholds: &BenchmarkRegressionThresholds,
 ) -> Result<BenchmarkComparisonReport> {
     let baseline: LoadedBenchmarkReport = read_json_report(baseline_path)?;
-    if baseline.mode != current_mode.label() {
-        anyhow::bail!(
-            "baseline mode '{}' does not match current mode '{}'",
-            baseline.mode,
-            current_mode.label()
-        );
-    }
+    validate_benchmark_compatibility(current, &baseline, baseline_path)?;
+    let baseline_mode = baseline.mode;
+    let baseline_summary = baseline.summary;
 
     let mut current_map = BTreeMap::new();
-    for summary in current_summary {
+    for summary in &current.summary {
         current_map.insert(summary.strategy, summary);
     }
 
     let mut baseline_map = BTreeMap::new();
-    for summary in baseline.summary {
+    for summary in baseline_summary {
         let strategy = EvaluationStrategy::parse(&summary.strategy)?;
         if baseline_map.insert(strategy, summary).is_some() {
             anyhow::bail!(
@@ -617,33 +617,16 @@ fn compare_against_baseline(
 
     let current_keys: BTreeSet<_> = current_map.keys().copied().collect();
     let baseline_keys: BTreeSet<_> = baseline_map.keys().copied().collect();
-    let shared_keys: Vec<_> = current_keys.intersection(&baseline_keys).copied().collect();
-    if shared_keys.is_empty() {
-        anyhow::bail!(
-            "baseline '{}' shares no strategies with the current benchmark",
-            baseline_path
-        );
-    }
-
-    let missing_in_current = baseline_keys
-        .difference(&current_keys)
+    let shared_keys = current_keys
+        .intersection(&baseline_keys)
         .copied()
-        .map(|strategy| strategy.label().to_string())
         .collect::<Vec<_>>();
-    let missing_in_baseline = current_keys
-        .difference(&baseline_keys)
-        .copied()
-        .map(|strategy| strategy.label().to_string())
-        .collect::<Vec<_>>();
-
-    let thresholds = regression_thresholds(args);
-    validate_threshold_values(&thresholds)?;
 
     let mut entries = Vec::with_capacity(shared_keys.len());
     for strategy in shared_keys {
         let current = current_map[&strategy];
         let baseline = &baseline_map[&strategy];
-        let regressions = collect_regressions(current, baseline, &thresholds);
+        let regressions = collect_regressions(current, baseline, thresholds);
 
         entries.push(BenchmarkComparisonEntry {
             strategy,
@@ -663,12 +646,12 @@ fn compare_against_baseline(
 
     Ok(BenchmarkComparisonReport {
         baseline_path: baseline_path.to_string(),
-        baseline_mode: baseline.mode,
-        current_mode: current_mode.label().to_string(),
+        baseline_mode,
+        current_mode: current.mode.label().to_string(),
         shared_strategies: entries.len(),
-        missing_in_current,
-        missing_in_baseline,
-        thresholds,
+        missing_in_current: Vec::new(),
+        missing_in_baseline: Vec::new(),
+        thresholds: (*thresholds).clone(),
         entries,
     })
 }
@@ -676,6 +659,9 @@ fn compare_against_baseline(
 fn validate_threshold_values(thresholds: &BenchmarkRegressionThresholds) -> Result<()> {
     let check = |name: &str, value: Option<f32>| -> Result<()> {
         if let Some(value) = value {
+            if !value.is_finite() {
+                anyhow::bail!("{} must be finite", name);
+            }
             if value < 0.0 {
                 anyhow::bail!("{} must be non-negative", name);
             }
@@ -698,6 +684,128 @@ fn validate_threshold_values(thresholds: &BenchmarkRegressionThresholds) -> Resu
     check("max_reward_drop", thresholds.max_reward_drop)?;
     check("max_success_rate_drop", thresholds.max_success_rate_drop)?;
     Ok(())
+}
+
+fn validate_benchmark_compatibility(
+    current: &BenchmarkReport,
+    baseline: &LoadedBenchmarkReport,
+    baseline_path: &str,
+) -> Result<()> {
+    let mut mismatches = Vec::new();
+
+    if baseline.mode != current.mode.label() {
+        mismatches.push(format!(
+            "mode (baseline '{}' vs current '{}')",
+            baseline.mode,
+            current.mode.label()
+        ));
+    }
+    if baseline.checkpoint_dir != current.checkpoint_dir {
+        mismatches.push(format!(
+            "checkpoint_dir (baseline '{}' vs current '{}')",
+            baseline.checkpoint_dir, current.checkpoint_dir
+        ));
+    }
+    if baseline.policy_checkpoint != current.policy_checkpoint {
+        mismatches.push(format!(
+            "policy_checkpoint (baseline '{:?}' vs current '{:?}')",
+            baseline.policy_checkpoint, current.policy_checkpoint
+        ));
+    }
+    if baseline.world_model_checkpoint != current.world_model_checkpoint {
+        mismatches.push(format!(
+            "world_model_checkpoint (baseline '{:?}' vs current '{:?}')",
+            baseline.world_model_checkpoint, current.world_model_checkpoint
+        ));
+    }
+    if baseline.data != current.data {
+        mismatches.push(format!(
+            "data (baseline '{:?}' vs current '{:?}')",
+            baseline.data, current.data
+        ));
+    }
+
+    let current_strategies = normalize_strategy_labels(&current.strategies);
+    let baseline_strategies =
+        normalize_strategy_labels(&parse_strategies_from_labels(&baseline.strategies)?);
+    if baseline_strategies != current_strategies {
+        mismatches.push(format!(
+            "strategies (baseline {:?} vs current {:?})",
+            baseline_strategies, current_strategies
+        ));
+    }
+
+    let current_seeds = normalize_seeds(&current.seeds);
+    let baseline_seeds = normalize_seeds(&baseline.seeds);
+    if baseline_seeds != current_seeds {
+        mismatches.push(format!(
+            "seeds (baseline {:?} vs current {:?})",
+            baseline_seeds, current_seeds
+        ));
+    }
+
+    if baseline.episodes_per_seed != current.episodes_per_seed {
+        mismatches.push(format!(
+            "episodes_per_seed (baseline {} vs current {})",
+            baseline.episodes_per_seed, current.episodes_per_seed
+        ));
+    }
+    if baseline.episode_length != current.episode_length {
+        mismatches.push(format!(
+            "episode_length (baseline {} vs current {})",
+            baseline.episode_length, current.episode_length
+        ));
+    }
+    if baseline.num_candidates != current.num_candidates {
+        mismatches.push(format!(
+            "num_candidates (baseline {} vs current {})",
+            baseline.num_candidates, current.num_candidates
+        ));
+    }
+    if baseline.opt_steps != current.opt_steps {
+        mismatches.push(format!(
+            "opt_steps (baseline {} vs current {})",
+            baseline.opt_steps, current.opt_steps
+        ));
+    }
+    if (baseline.opt_learning_rate - current.opt_learning_rate).abs() > f32::EPSILON {
+        mismatches.push(format!(
+            "opt_learning_rate (baseline {} vs current {})",
+            baseline.opt_learning_rate, current.opt_learning_rate
+        ));
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "baseline '{}' is not compatible with the current benchmark suite: {}",
+        baseline_path,
+        mismatches.join(", ")
+    );
+}
+
+fn normalize_strategy_labels(strategies: &[EvaluationStrategy]) -> Vec<String> {
+    let mut labels = strategies
+        .iter()
+        .map(|strategy| strategy.label().to_string())
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels
+}
+
+fn normalize_seeds(seeds: &[u64]) -> Vec<u64> {
+    let mut seeds = seeds.to_vec();
+    seeds.sort_unstable();
+    seeds
+}
+
+fn parse_strategies_from_labels(values: &[String]) -> Result<Vec<EvaluationStrategy>> {
+    values
+        .iter()
+        .map(|value| EvaluationStrategy::parse(value))
+        .collect()
 }
 
 fn collect_regressions(
@@ -1324,5 +1432,97 @@ mod tests {
         assert!(message.contains("[rank] mean_reward"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn benchmark_rejects_incompatible_baseline_suite() {
+        let dir = temp_benchmark_dir("baseline_mismatch");
+        let (policy_path, world_model_path) = save_tiny_checkpoints(&dir).unwrap();
+        let baseline_path = dir.join("reports/baseline.json");
+
+        let args = BenchmarkArgs {
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: false,
+            strategies: Vec::new(),
+            seeds: vec![11, 17],
+            episodes: 2,
+            episode_length: 8,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: Some(0.05),
+            output: Some(baseline_path.to_string_lossy().to_string()),
+            baseline: None,
+            max_rollout_mse_increase: None,
+            max_terminal_distance_increase: None,
+            max_action_mse_increase: None,
+            max_reward_drop: None,
+            max_success_rate_drop: None,
+        };
+
+        run_benchmark(args).unwrap();
+
+        let mut baseline_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&baseline_path).unwrap()).unwrap();
+        baseline_json["episode_length"] = serde_json::Value::from(99);
+        std::fs::write(
+            &baseline_path,
+            serde_json::to_vec_pretty(&baseline_json).unwrap(),
+        )
+        .unwrap();
+
+        let comparison_args = BenchmarkArgs {
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: false,
+            strategies: Vec::new(),
+            seeds: vec![11, 17],
+            episodes: 2,
+            episode_length: 8,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: Some(0.05),
+            output: Some(
+                dir.join("reports/mismatch.json")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            baseline: Some(baseline_path.to_string_lossy().to_string()),
+            max_rollout_mse_increase: None,
+            max_terminal_distance_increase: None,
+            max_action_mse_increase: None,
+            max_reward_drop: None,
+            max_success_rate_drop: None,
+        };
+
+        let err = run_benchmark(comparison_args).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("not compatible"));
+        assert!(message.contains("episode_length"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn benchmark_rejects_non_finite_thresholds() {
+        let nan_thresholds = BenchmarkRegressionThresholds {
+            max_rollout_mse_increase: Some(f32::NAN),
+            ..Default::default()
+        };
+        let err = validate_threshold_values(&nan_thresholds).unwrap_err();
+        assert!(format!("{err:#}").contains("must be finite"));
+
+        let inf_thresholds = BenchmarkRegressionThresholds {
+            max_reward_drop: Some(f32::INFINITY),
+            ..Default::default()
+        };
+        let err = validate_threshold_values(&inf_thresholds).unwrap_err();
+        assert!(format!("{err:#}").contains("must be finite"));
     }
 }
