@@ -73,10 +73,6 @@ pub struct TrainArgs {
     #[arg(long)]
     warmup_steps: Option<usize>,
 
-    /// How often to save checkpoints, in epochs.
-    #[arg(long)]
-    checkpoint_every: Option<usize>,
-
     /// How often to log metrics, in steps.
     #[arg(long)]
     log_every: Option<usize>,
@@ -118,7 +114,6 @@ impl Default for TrainArgs {
             weight_decay: None,
             grad_clip_norm: None,
             warmup_steps: None,
-            checkpoint_every: None,
             log_every: None,
             seed: None,
             synthetic: false,
@@ -812,9 +807,6 @@ fn apply_training_overrides(training_config: &mut TrainingConfig, args: &TrainAr
     if let Some(warmup_steps) = args.warmup_steps {
         training_config.warmup_steps = warmup_steps;
     }
-    if let Some(checkpoint_every) = args.checkpoint_every {
-        training_config.checkpoint_every = checkpoint_every;
-    }
     if let Some(log_every) = args.log_every {
         training_config.log_every = log_every;
     }
@@ -993,7 +985,6 @@ mod tests {
             weight_decay: Some(-0.1),
             grad_clip_norm: Some(0.5),
             warmup_steps: Some(2),
-            checkpoint_every: Some(1),
             log_every: Some(1),
             seed: Some(17),
             synthetic: false,
@@ -1090,7 +1081,6 @@ mod tests {
             weight_decay: Some(0.0),
             grad_clip_norm: Some(0.5),
             warmup_steps: Some(2),
-            checkpoint_every: Some(1),
             log_every: Some(1),
             seed: Some(17),
             synthetic: false,
@@ -1121,7 +1111,6 @@ mod tests {
         assert_eq!(report.settings.training.weight_decay, 0.0);
         assert_eq!(report.settings.training.grad_clip_norm, 0.5);
         assert_eq!(report.settings.training.warmup_steps, 2);
-        assert_eq!(report.settings.training.checkpoint_every, 1);
         assert_eq!(report.settings.training.log_every, 1);
         assert_eq!(report.settings.training.seed, 17);
 
