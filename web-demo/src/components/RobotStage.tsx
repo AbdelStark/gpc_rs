@@ -8,7 +8,7 @@ interface RobotStageProps {
   mode: PlannerMode
 }
 
-const VIEW_BOX = '-1.22 -0.32 2.64 1.86'
+const VIEW_BOX = '-1.4 -1.15 3.0 2.6'
 
 function pathFromPoints(points: Vec2[]): string {
   if (points.length === 0) return ''
@@ -107,9 +107,9 @@ export function RobotStage({ mission, frame, mode }: RobotStageProps) {
         </defs>
 
         {/* background */}
-        <rect x="-1.25" y="-0.35" width="2.7" height="1.9" className="robot-stage__backplate" />
-        <rect x="-1.25" y="-0.35" width="2.7" height="1.9" fill="url(#gridPattern)" />
-        <rect x="-1.25" y="-0.35" width="2.7" height="1.9" fill="url(#stageGlow)" />
+        <rect x="-1.43" y="-1.18" width="3.06" height="2.66" className="robot-stage__backplate" />
+        <rect x="-1.43" y="-1.18" width="3.06" height="2.66" fill="url(#gridPattern)" />
+        <rect x="-1.43" y="-1.18" width="3.06" height="2.66" fill="url(#stageGlow)" />
         <circle cx="0" cy="-0.02" r="1.36" className="robot-stage__reach" />
 
         {/* candidate trajectories (ghost trails) */}
