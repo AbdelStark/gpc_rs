@@ -164,6 +164,7 @@ function App() {
   const [candidateCount, setCandidateCount] = useState(18)
   const [frameIndex, setFrameIndex] = useState(0)
   const [autoplay, setAutoplay] = useState(true)
+  const [playbackSpeed, setPlaybackSpeed] = useState(1)
   const [simulating, setSimulating] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const plannerRef = useRef<PlannerClient | null>(null)
@@ -320,9 +321,10 @@ function App() {
 
   useEffect(() => {
     if (!autoplay || !playback?.frames.length) return
-    const timer = window.setInterval(() => tickFrame(), 1400)
+    const interval = Math.round(1400 / playbackSpeed)
+    const timer = window.setInterval(() => tickFrame(), interval)
     return () => window.clearInterval(timer)
-  }, [autoplay, playback?.frames.length])
+  }, [autoplay, playback?.frames.length, playbackSpeed])
 
   /* keyboard shortcuts */
   useEffect(() => {
@@ -589,6 +591,18 @@ function App() {
               >
                 Step
               </button>
+            </div>
+            <div className="speed-controls">
+              {[0.5, 1, 2, 4].map((speed) => (
+                <button
+                  key={speed}
+                  className={`speed-btn${playbackSpeed === speed ? ' is-active' : ''}`}
+                  onClick={() => setPlaybackSpeed(speed)}
+                  type="button"
+                >
+                  {speed}x
+                </button>
+              ))}
             </div>
             <input
               className="timeline-slider"

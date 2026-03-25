@@ -60,7 +60,7 @@ pub fn preset_missions() -> Vec<MissionSpec> {
                     radius: 0.13,
                 },
             ],
-            max_steps: 10,
+            max_steps: 24,
         },
         MissionSpec {
             id: "gate".to_string(),
@@ -83,7 +83,7 @@ pub fn preset_missions() -> Vec<MissionSpec> {
                     radius: 0.15,
                 },
             ],
-            max_steps: 11,
+            max_steps: 28,
         },
         MissionSpec {
             id: "late-pivot".to_string(),
@@ -106,7 +106,7 @@ pub fn preset_missions() -> Vec<MissionSpec> {
                     radius: 0.14,
                 },
             ],
-            max_steps: 10,
+            max_steps: 24,
         },
     ]
 }

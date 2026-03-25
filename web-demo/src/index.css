@@ -845,6 +845,40 @@ button { cursor: pointer; }
   background: var(--s3);
 }
 
+/* ─── speed controls ─────────────────────────────────────────────── */
+
+.speed-controls {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+
+.speed-btn {
+  flex: 1;
+  padding: 0.3rem 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-subtle);
+  background: transparent;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--t3);
+  transition: color var(--dur-micro) var(--ease),
+              border-color var(--dur-micro) var(--ease),
+              background var(--dur-micro) var(--ease);
+}
+
+.speed-btn:hover {
+  color: var(--t2);
+  border-color: var(--line);
+}
+
+.speed-btn.is-active {
+  background: var(--s3);
+  border-color: var(--orange);
+  color: var(--t1);
+}
+
 .timeline-slider {
   margin-top: 0.5rem;
 }
