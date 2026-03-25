@@ -215,6 +215,8 @@ Training now persists real Burn artifacts by default:
 
 Use `--validation-split <fraction>` on `train` to hold out episodes for validation and select the best epoch by validation loss. The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
 
+Within `gpc-train`, `TrainingConfig.seed` now seeds model initialization, minibatch shuffling, and policy diffusion noise/timestep sampling so repeated runs on the same backend/device are reproducible.
+
 ## Minimal Library Example
 
 Wire up randomly initialized components and run GPC-RANK:

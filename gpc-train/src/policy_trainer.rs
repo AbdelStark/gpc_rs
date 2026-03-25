@@ -2,13 +2,16 @@
 
 use burn::optim::{AdamWConfig, Optimizer};
 use burn::prelude::*;
-use burn::tensor::Distribution;
 
 use gpc_core::config::{PolicyConfig, TrainingConfig};
 use gpc_core::noise::DdpmSchedule;
 use gpc_core::tensor_utils;
 
 use crate::data::{GpcDataset, PolicyBatch, PolicyBatcher, PolicySampleData};
+
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
 
 /// Result of a completed policy training run.
 pub struct PolicyTrainingResult<B: burn::tensor::backend::Backend> {
@@ -88,6 +91,7 @@ impl PolicyTrainer {
 
         tracing::info!("Starting diffusion policy training");
 
+        B::seed(device, self.training_config.seed);
         let policy_config = DiffusionPolicyConfig::from_policy_config(&self.policy_config);
         let mut model = policy_config.init::<B>(device);
         let mut final_epoch = None;
@@ -138,13 +142,24 @@ impl PolicyTrainer {
             let mut epoch_loss = 0.0_f32;
             let mut num_batches = 0;
 
-            for chunk in samples.chunks(batch_size) {
+            let mut indices: Vec<usize> = (0..samples.len()).collect();
+            let mut shuffle_rng =
+                StdRng::seed_from_u64(epoch_seed(self.training_config.seed, epoch));
+            indices.shuffle(&mut shuffle_rng);
+
+            for (batch_index, chunk) in indices.chunks(batch_size).enumerate() {
+                let batch_samples = chunk.iter().map(|&index| samples[index].clone()).collect();
                 let batch: PolicyBatch<B> = burn::data::dataloader::batcher::Batcher::batch(
                     &batcher,
-                    chunk.to_vec(),
+                    batch_samples,
                     batcher.device(),
                 );
-                let loss = policy_batch_loss(&model, &schedule, &batch);
+                let mut batch_rng = StdRng::seed_from_u64(batch_seed(
+                    self.training_config.seed,
+                    epoch,
+                    batch_index,
+                ));
+                let loss = policy_batch_loss(&model, &schedule, &batch, &mut batch_rng);
                 let loss_val: f32 = loss.clone().into_scalar().elem();
 
                 // Backward pass
@@ -171,9 +186,14 @@ impl PolicyTrainer {
             }
 
             if let Some(validation_samples) = validation_samples.as_ref() {
-                if let Some(validation_loss) =
-                    evaluate_policy_loss(&model, &schedule, validation_samples, &batcher)
-                {
+                if let Some(validation_loss) = evaluate_policy_loss(
+                    &model,
+                    &schedule,
+                    validation_samples,
+                    &batcher,
+                    self.training_config.seed,
+                    epoch,
+                ) {
                     validation_losses.push(validation_loss);
                     let is_best = best_validation_loss
                         .map(|best| validation_loss < best)
@@ -214,6 +234,7 @@ fn policy_batch_loss<B: burn::tensor::backend::Backend>(
     model: &gpc_policy::DiffusionPolicy<B>,
     schedule: &DdpmSchedule,
     batch: &PolicyBatch<B>,
+    rng: &mut StdRng,
 ) -> Tensor<B, 1> {
     let [bs, pred_h, act_dim] = batch.actions.dims();
     let device = batch.actions.device();
@@ -222,11 +243,7 @@ fn policy_batch_loss<B: burn::tensor::backend::Backend>(
     let obs_flat = tensor_utils::flatten_last_two(batch.observations.clone());
 
     let timestep_indices: Vec<usize> = (0..bs)
-        .map(|_| {
-            (rand::random::<f32>() * schedule.num_timesteps as f32)
-                .floor()
-                .min((schedule.num_timesteps - 1) as f32) as usize
-        })
+        .map(|_| rng.gen_range(0..schedule.num_timesteps))
         .collect();
     let timesteps = Tensor::<B, 1>::from_floats(
         timestep_indices
@@ -237,11 +254,7 @@ fn policy_batch_loss<B: burn::tensor::backend::Backend>(
         &device,
     );
 
-    let noise = Tensor::<B, 2>::random(
-        [bs, pred_h * act_dim],
-        Distribution::Normal(0.0, 1.0),
-        &device,
-    );
+    let noise = deterministic_normal_tensor::<B>([bs, pred_h * act_dim], &device, rng);
     let noisy_actions =
         schedule.add_noise_batch(&actions_flat, &noise, timestep_indices.as_slice());
     let noise_pred = model.predict_noise(noisy_actions, obs_flat, timesteps);
@@ -249,11 +262,49 @@ fn policy_batch_loss<B: burn::tensor::backend::Backend>(
     tensor_utils::mse_loss(&noise_pred, &noise)
 }
 
+fn deterministic_normal_tensor<B: burn::tensor::backend::Backend>(
+    shape: [usize; 2],
+    device: &B::Device,
+    rng: &mut StdRng,
+) -> Tensor<B, 2> {
+    let num_values = shape[0] * shape[1];
+    let mut values = Vec::with_capacity(num_values);
+
+    while values.len() < num_values {
+        let u1 = rng.gen_range(f32::EPSILON..1.0);
+        let u2 = rng.gen_range(0.0..1.0);
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let angle = 2.0 * std::f32::consts::PI * u2;
+
+        values.push(radius * angle.cos());
+        if values.len() < num_values {
+            values.push(radius * angle.sin());
+        }
+    }
+
+    Tensor::<B, 1>::from_floats(values.as_slice(), device).reshape(shape)
+}
+
+fn epoch_seed(seed: u64, epoch: usize) -> u64 {
+    seed.wrapping_add((epoch as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+fn batch_seed(seed: u64, epoch: usize, batch_index: usize) -> u64 {
+    seed.wrapping_add((epoch as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add((batch_index as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+}
+
+fn validation_batch_seed(seed: u64, epoch: usize, batch_index: usize) -> u64 {
+    batch_seed(seed ^ 0x94D0_49BB_1331_11EB, epoch, batch_index)
+}
+
 fn evaluate_policy_loss<B: burn::tensor::backend::Backend>(
     model: &gpc_policy::DiffusionPolicy<B>,
     schedule: &DdpmSchedule,
     samples: &[PolicySampleData],
     batcher: &PolicyBatcher<B>,
+    seed: u64,
+    epoch: usize,
 ) -> Option<f32> {
     if samples.is_empty() {
         return None;
@@ -263,13 +314,14 @@ fn evaluate_policy_loss<B: burn::tensor::backend::Backend>(
     let mut total_loss = 0.0_f32;
     let mut num_batches = 0usize;
 
-    for chunk in samples.chunks(batch_size) {
+    for (batch_index, chunk) in samples.chunks(batch_size).enumerate() {
         let batch: PolicyBatch<B> = burn::data::dataloader::batcher::Batcher::batch(
             batcher,
             chunk.to_vec(),
             batcher.device(),
         );
-        let loss = policy_batch_loss(model, schedule, &batch);
+        let mut batch_rng = StdRng::seed_from_u64(validation_batch_seed(seed, epoch, batch_index));
+        let loss = policy_batch_loss(model, schedule, &batch, &mut batch_rng);
         let loss_val: f32 = loss.into_scalar().elem();
         total_loss += loss_val;
         num_batches += 1;
@@ -290,6 +342,7 @@ mod tests {
 
     #[test]
     fn test_policy_training_runs() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {
@@ -329,7 +382,52 @@ mod tests {
     }
 
     #[test]
+    fn test_policy_training_is_deterministic_for_seed() {
+        let _guard = crate::test_support::training_test_guard();
+        let device = <TestBackend as Backend>::Device::default();
+
+        let dataset_config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(dataset_config, 3, 20, 42);
+
+        let training_config = TrainingConfig {
+            num_epochs: 2,
+            batch_size: 8,
+            learning_rate: 1e-3,
+            log_every: 1,
+            seed: 1337,
+            ..Default::default()
+        };
+
+        let policy_config = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            ..Default::default()
+        };
+
+        let trainer = PolicyTrainer::new(training_config, policy_config);
+        let first = trainer.train_with_summary::<TestBackend>(&dataset, &device);
+        let second = trainer.train_with_summary::<TestBackend>(&dataset, &device);
+
+        assert_eq!(first.epoch_losses, second.epoch_losses);
+        assert_eq!(first.final_loss, second.final_loss);
+        assert_eq!(first.final_epoch, second.final_epoch);
+    }
+
+    #[test]
     fn test_policy_validation_summary_tracks_best_model() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {

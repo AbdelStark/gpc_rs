@@ -11,6 +11,10 @@ use crate::data::{
     WorldModelTransitionSample,
 };
 
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+
 /// Result of a completed world model training run.
 pub struct WorldModelTrainingResult<B: burn::tensor::backend::Backend> {
     /// Trained world model.
@@ -86,6 +90,7 @@ impl WorldModelTrainer {
 
         tracing::info!("Starting Phase 1 training: single-step prediction");
 
+        B::seed(device, self.training_config.seed);
         let model_config = StateWorldModelConfig {
             state_dim: self.world_model_config.state_dim,
             action_dim: self.world_model_config.action_dim,
@@ -134,11 +139,17 @@ impl WorldModelTrainer {
             let mut epoch_loss = 0.0_f32;
             let mut num_batches = 0;
 
+            let mut indices: Vec<usize> = (0..samples.len()).collect();
+            let mut shuffle_rng =
+                StdRng::seed_from_u64(epoch_seed(self.training_config.seed, epoch));
+            indices.shuffle(&mut shuffle_rng);
+
             // Simple batching
-            for chunk in samples.chunks(batch_size) {
+            for chunk in indices.chunks(batch_size) {
+                let batch_samples = chunk.iter().map(|&index| samples[index].clone()).collect();
                 let batch: WorldModelBatch<B> = burn::data::dataloader::batcher::Batcher::batch(
                     &batcher,
-                    chunk.to_vec(),
+                    batch_samples,
                     batcher.device(),
                 );
                 let loss = world_model_phase1_batch_loss(&model, &batch);
@@ -270,6 +281,7 @@ impl WorldModelTrainer {
             horizon
         );
 
+        B::seed(device, self.training_config.seed);
         let mut final_epoch = None;
         let mut final_loss = None;
         let mut epoch_losses = Vec::with_capacity(self.training_config.num_epochs);
@@ -310,9 +322,23 @@ impl WorldModelTrainer {
             let mut epoch_loss = 0.0_f32;
             let mut num_batches = 0;
 
-            for chunk in sequences.chunks(batch_size) {
+            let mut indices: Vec<usize> = (0..sequences.len()).collect();
+            let mut shuffle_rng =
+                StdRng::seed_from_u64(epoch_seed(self.training_config.seed, epoch));
+            indices.shuffle(&mut shuffle_rng);
+
+            for chunk in indices.chunks(batch_size) {
+                let batch_sequences: Vec<_> = chunk
+                    .iter()
+                    .map(|&index| sequences[index].clone())
+                    .collect();
                 let avg_loss = world_model_phase2_batch_loss(
-                    &model, chunk, horizon, state_dim, action_dim, device,
+                    &model,
+                    batch_sequences.as_slice(),
+                    horizon,
+                    state_dim,
+                    action_dim,
+                    device,
                 );
                 let loss_val: f32 = avg_loss.clone().into_scalar().elem();
 
@@ -519,6 +545,10 @@ fn evaluate_phase2_loss<B: Backend>(
     (num_batches > 0).then_some(total_loss / num_batches as f32)
 }
 
+fn epoch_seed(seed: u64, epoch: usize) -> u64 {
+    seed.wrapping_add((epoch as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +561,7 @@ mod tests {
 
     #[test]
     fn test_phase1_trains_without_error() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {
@@ -568,7 +599,50 @@ mod tests {
     }
 
     #[test]
+    fn test_phase1_training_is_deterministic_for_seed() {
+        let _guard = crate::test_support::training_test_guard();
+        let device = <TestBackend as Backend>::Device::default();
+
+        let dataset_config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(dataset_config, 3, 20, 42);
+
+        let training_config = TrainingConfig {
+            num_epochs: 2,
+            batch_size: 16,
+            learning_rate: 1e-3,
+            log_every: 1,
+            seed: 1337,
+            ..Default::default()
+        };
+
+        let world_model_config = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            ..Default::default()
+        };
+
+        let trainer = WorldModelTrainer::new(training_config, world_model_config);
+        let first = trainer.train_phase1_with_summary::<TestBackend>(&dataset, &device);
+        let second = trainer.train_phase1_with_summary::<TestBackend>(&dataset, &device);
+
+        assert_eq!(first.epoch_losses, second.epoch_losses);
+        assert_eq!(first.final_loss, second.final_loss);
+        assert_eq!(first.final_epoch, second.final_epoch);
+    }
+
+    #[test]
     fn test_phase1_validation_summary_tracks_best_model() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {
@@ -622,6 +696,7 @@ mod tests {
 
     #[test]
     fn test_phase2_trains_without_error() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {
@@ -665,7 +740,57 @@ mod tests {
     }
 
     #[test]
+    fn test_phase2_training_is_deterministic_for_seed() {
+        let _guard = crate::test_support::training_test_guard();
+        let device = <TestBackend as Backend>::Device::default();
+
+        let dataset_config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(dataset_config, 3, 20, 42);
+
+        let training_config = TrainingConfig {
+            num_epochs: 2,
+            batch_size: 16,
+            learning_rate: 1e-3,
+            log_every: 1,
+            seed: 1337,
+            ..Default::default()
+        };
+
+        let world_model_config = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            ..Default::default()
+        };
+
+        let trainer = WorldModelTrainer::new(training_config, world_model_config);
+        let phase1 = trainer.train_phase1_with_summary::<TestBackend>(&dataset, &device);
+        let first = trainer.train_phase2_with_summary::<TestBackend>(
+            &dataset,
+            phase1.model.clone(),
+            2,
+            &device,
+        );
+        let second =
+            trainer.train_phase2_with_summary::<TestBackend>(&dataset, phase1.model, 2, &device);
+
+        assert_eq!(first.epoch_losses, second.epoch_losses);
+        assert_eq!(first.final_loss, second.final_loss);
+        assert_eq!(first.final_epoch, second.final_epoch);
+    }
+
+    #[test]
     fn test_phase2_validation_summary_tracks_best_model() {
+        let _guard = crate::test_support::training_test_guard();
         let device = <TestBackend as Backend>::Device::default();
 
         let dataset_config = GpcDatasetConfig {

@@ -14,3 +14,16 @@ pub use policy_trainer::{PolicyTrainer, PolicyTrainingResult, PolicyValidationSu
 pub use world_model_trainer::{
     WorldModelTrainer, WorldModelTrainingResult, WorldModelValidationSummary,
 };
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    static TRAINING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn training_test_guard() -> MutexGuard<'static, ()> {
+        TRAINING_TEST_LOCK
+            .lock()
+            .expect("training test mutex should not be poisoned")
+    }
+}
