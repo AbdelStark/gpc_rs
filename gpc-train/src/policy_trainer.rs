@@ -8,6 +8,7 @@ use gpc_core::noise::DdpmSchedule;
 use gpc_core::tensor_utils;
 
 use crate::data::{GpcDataset, PolicyBatch, PolicyBatcher, PolicySampleData};
+use crate::optimization::{gradient_clipping, learning_rate_for_step};
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -107,6 +108,9 @@ impl PolicyTrainer {
         let optimizer_config =
             AdamWConfig::new().with_weight_decay(self.training_config.weight_decay as f32);
         let mut optim = optimizer_config.init();
+        if let Some(clipping) = gradient_clipping(&self.training_config) {
+            optim = optim.with_grad_clipping(clipping);
+        }
 
         let samples = dataset.policy_samples();
         if samples.is_empty() {
@@ -138,9 +142,12 @@ impl PolicyTrainer {
         );
         let batch_size = self.training_config.batch_size.min(samples.len());
 
+        let mut optimizer_step = 0usize;
+
         for epoch in 0..self.training_config.num_epochs {
             let mut epoch_loss = 0.0_f32;
             let mut num_batches = 0;
+            let mut epoch_learning_rate = self.training_config.learning_rate;
 
             let mut indices: Vec<usize> = (0..samples.len()).collect();
             let mut shuffle_rng =
@@ -161,14 +168,21 @@ impl PolicyTrainer {
                 ));
                 let loss = policy_batch_loss(&model, &schedule, &batch, &mut batch_rng);
                 let loss_val: f32 = loss.clone().into_scalar().elem();
+                let learning_rate = learning_rate_for_step(
+                    self.training_config.learning_rate,
+                    self.training_config.warmup_steps,
+                    optimizer_step,
+                );
 
                 // Backward pass
                 let grads = loss.backward();
                 let grads = burn::optim::GradientsParams::from_grads(grads, &model);
-                model = optim.step(self.training_config.learning_rate, model, grads);
+                model = optim.step(learning_rate, model, grads);
 
                 epoch_loss += loss_val;
                 num_batches += 1;
+                epoch_learning_rate = learning_rate;
+                optimizer_step += 1;
             }
 
             let avg_loss = epoch_loss / num_batches as f32;
@@ -178,10 +192,11 @@ impl PolicyTrainer {
 
             if epoch % self.training_config.log_every == 0 {
                 tracing::info!(
-                    "Policy | Epoch {}/{} | Loss: {:.6}",
+                    "Policy | Epoch {}/{} | Loss: {:.6} | Lr: {:.6e}",
                     epoch + 1,
                     self.training_config.num_epochs,
-                    avg_loss
+                    avg_loss,
+                    epoch_learning_rate
                 );
             }
 
@@ -475,5 +490,50 @@ mod tests {
         let obs = Tensor::<TestBackend, 3>::zeros([1, 2, 4], &device);
         let best_actions = summary.best_model.sample(&obs, &device).unwrap();
         assert_eq!(best_actions.dims(), [1, 4, 2]);
+    }
+
+    #[test]
+    fn test_policy_training_supports_warmup_and_gradient_clipping() {
+        let _guard = crate::test_support::training_test_guard();
+        let device = <TestBackend as Backend>::Device::default();
+
+        let dataset_config = GpcDatasetConfig {
+            data_dir: "test".to_string(),
+            state_dim: 4,
+            action_dim: 2,
+            obs_dim: 4,
+            obs_horizon: 2,
+            pred_horizon: 4,
+        };
+
+        let dataset = GpcDataset::generate_synthetic(dataset_config, 4, 20, 123);
+
+        let training_config = TrainingConfig {
+            num_epochs: 2,
+            batch_size: 4,
+            learning_rate: 1e-3,
+            grad_clip_norm: 0.1,
+            warmup_steps: 3,
+            log_every: 1,
+            seed: 9,
+            ..Default::default()
+        };
+
+        let policy_config = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 4,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            ..Default::default()
+        };
+
+        let trainer = PolicyTrainer::new(training_config, policy_config);
+        let result = trainer.train_with_summary::<TestBackend>(&dataset, &device);
+
+        assert_eq!(result.final_epoch, Some(2));
+        assert_eq!(result.epoch_losses.len(), 2);
+        assert!(result.final_loss.is_some_and(f32::is_finite));
     }
 }

@@ -171,7 +171,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json`; writes `train_report.json` under the output dir unless `--report-output` is set |
 | `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` against synthetic or JSON datasets; `-o/--output` writes a summary JSON artifact and `--details-output` writes detailed telemetry |
 | `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks, emits JSON, and can gate regressions against a saved baseline |
-| `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
+| `checkpoint` | Inspect, verify, and convert `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `inspect` shows parsed config and file sizes; `verify` proves checkpoints reload cleanly |
 | `init-config` | Write a default JSON config file | Prints the generated config to stdout |
 
 ### CLI Examples
@@ -219,6 +219,11 @@ cargo run -p world-models-gpc-cli -- eval --demo --strategy opt --opt-steps 10
 
 # Inspect artifacts
 cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path model.onnx
+cargo run -p world-models-gpc-cli -- checkpoint --action inspect --path checkpoints/policy_final.bin
+
+# Verify that a checkpoint or ONNX artifact is loadable
+cargo run -p world-models-gpc-cli -- checkpoint --action verify --path checkpoints/policy_final.bin
+cargo run -p world-models-gpc-cli -- checkpoint --action verify --path model.onnx
 
 # Convert a Burn checkpoint between formats
 cargo run -p world-models-gpc-cli -- checkpoint --action convert --path checkpoints/policy_final.bin
@@ -234,9 +239,13 @@ Training now persists real Burn artifacts by default:
 - `world_model_final.bin` plus `world_model_final.meta.json`
 - `world_model_best.bin` plus `world_model_best.meta.json` when a validation split is used
 
-Use `--validation-split <fraction>` on `train` to hold out episodes for validation and select the best epoch by validation loss. The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion.
+Each checkpoint is reloaded and verified immediately after it is written, so failed saves surface during `train` instead of later during `eval` or `benchmark`.
+
+Use `--validation-split <fraction>` on `train` to hold out episodes for validation and select the best epoch by validation loss. The checkpoint metadata stores the model kind, epoch, loss, timestamp, and the serialized config used to reconstruct the module during conversion or verification.
 
 Within `gpc-train`, `TrainingConfig.seed` now seeds model initialization, minibatch shuffling, and policy diffusion noise/timestep sampling so repeated runs on the same backend/device are reproducible.
+
+`TrainingConfig.warmup_steps` now applies a linear per-optimizer-step learning-rate warmup, and `TrainingConfig.grad_clip_norm` enables AdamW norm clipping during policy and world-model training when set above `0.0`.
 
 When `benchmark` is run with `--baseline <previous-report.json>`, the emitted JSON includes a `comparison` section for every shared strategy and the CLI can turn metric deltas into a hard failure via `--max-rollout-mse-increase`, `--max-terminal-distance-increase`, `--max-action-mse-increase`, `--max-reward-drop`, and `--max-success-rate-drop`.
 

@@ -6,6 +6,7 @@
 //! - Diffusion policy training (independent)
 
 pub mod data;
+mod optimization;
 pub mod policy_trainer;
 pub mod world_model_trainer;
 
