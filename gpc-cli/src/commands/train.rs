@@ -222,11 +222,9 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         anyhow::bail!("dataset does not contain any episodes");
     }
 
-    let trains_world_model = matches!(args.component.as_str(), "world-model" | "wm" | "all");
-    if trains_world_model && validation_report.open_loop_window_count == 0 {
-        anyhow::bail!(
-            "dataset does not contain any usable open-loop windows for world-model training"
-        );
+    let trains_policy = matches!(args.component.as_str(), "policy" | "all");
+    if trains_policy && validation_report.open_loop_window_count == 0 {
+        anyhow::bail!("dataset does not contain any usable open-loop windows for policy training");
     }
 
     tracing::info!(
@@ -927,6 +925,178 @@ mod tests {
         assert_eq!(report.dataset.total_episodes, 1);
         assert_eq!(report.dataset.train_episodes, 1);
         assert_eq!(report.dataset.validation_episodes, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_train_accepts_short_dataset_for_world_model_only() {
+        let dir = temp_train_dir("world_model_short_dataset");
+        let data_dir = dir.join("data");
+        let output_dir = dir.join("runs");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = gpc_core::config::GpcConfig {
+            policy: PolicyConfig {
+                obs_dim: 4,
+                action_dim: 2,
+                obs_horizon: 2,
+                pred_horizon: 4,
+                action_horizon: 2,
+                hidden_dim: 8,
+                num_res_blocks: 1,
+                noise_schedule: NoiseScheduleConfig {
+                    num_timesteps: 8,
+                    beta_start: 1e-4,
+                    beta_end: 0.02,
+                },
+            },
+            world_model: WorldModelConfig {
+                state_dim: 4,
+                action_dim: 2,
+                hidden_dim: 8,
+                num_layers: 1,
+                dropout: 0.0,
+            },
+            training: TrainingConfig {
+                num_epochs: 1,
+                batch_size: 1,
+                learning_rate: 1e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+                warmup_steps: 0,
+                checkpoint_every: 1,
+                log_every: 1,
+                seed: 7,
+            },
+            ..Default::default()
+        };
+
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let episodes = vec![Episode {
+            states: vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.1, 0.0, 0.0, 0.0]],
+            actions: vec![vec![0.1, 0.0]],
+            observations: vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.1, 0.0, 0.0, 0.0]],
+        }];
+        let episodes_path = data_dir.join("episodes.json");
+        std::fs::write(
+            &episodes_path,
+            serde_json::to_string_pretty(&episodes).unwrap(),
+        )
+        .unwrap();
+
+        let report_output = default_train_report_path(&output_dir);
+        let args = TrainArgs {
+            config: Some(config_path.display().to_string()),
+            data: Some(episodes_path.display().to_string()),
+            component: "world-model".to_string(),
+            epochs: Some(1),
+            synthetic: false,
+            output: output_dir.display().to_string(),
+            horizon: 4,
+            validation_split: 0.0,
+            report_output: None,
+        };
+
+        run_train(args).unwrap();
+
+        assert!(
+            report_output.exists(),
+            "expected train report to be written"
+        );
+        let report: TrainingReport =
+            serde_json::from_str(&std::fs::read_to_string(&report_output).unwrap()).unwrap();
+        assert_eq!(report.request.component_resolved, "world-model");
+        assert_eq!(report.dataset.total_episodes, 1);
+        assert_eq!(report.dataset.total_transitions, 1);
+        assert_eq!(report.dataset.train_episodes, 1);
+        assert_eq!(report.dataset.validation_episodes, 0);
+        assert!(report.world_model.is_some());
+        assert!(report.policy.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_train_rejects_short_dataset_for_policy_training() {
+        let dir = temp_train_dir("policy_short_dataset");
+        let data_dir = dir.join("data");
+        let output_dir = dir.join("runs");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = gpc_core::config::GpcConfig {
+            policy: PolicyConfig {
+                obs_dim: 4,
+                action_dim: 2,
+                obs_horizon: 2,
+                pred_horizon: 4,
+                action_horizon: 2,
+                hidden_dim: 8,
+                num_res_blocks: 1,
+                noise_schedule: NoiseScheduleConfig {
+                    num_timesteps: 8,
+                    beta_start: 1e-4,
+                    beta_end: 0.02,
+                },
+            },
+            world_model: WorldModelConfig {
+                state_dim: 4,
+                action_dim: 2,
+                hidden_dim: 8,
+                num_layers: 1,
+                dropout: 0.0,
+            },
+            training: TrainingConfig {
+                num_epochs: 1,
+                batch_size: 1,
+                learning_rate: 1e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+                warmup_steps: 0,
+                checkpoint_every: 1,
+                log_every: 1,
+                seed: 7,
+            },
+            ..Default::default()
+        };
+
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let episodes = vec![Episode {
+            states: vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.1, 0.0, 0.0, 0.0]],
+            actions: vec![vec![0.1, 0.0]],
+            observations: vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.1, 0.0, 0.0, 0.0]],
+        }];
+        let episodes_path = data_dir.join("episodes.json");
+        std::fs::write(
+            &episodes_path,
+            serde_json::to_string_pretty(&episodes).unwrap(),
+        )
+        .unwrap();
+
+        let args = TrainArgs {
+            config: Some(config_path.display().to_string()),
+            data: Some(episodes_path.display().to_string()),
+            component: "policy".to_string(),
+            epochs: Some(1),
+            synthetic: false,
+            output: output_dir.display().to_string(),
+            horizon: 4,
+            validation_split: 0.0,
+            report_output: None,
+        };
+
+        let err =
+            run_train(args).expect_err("short dataset should be rejected for policy training");
+        assert!(
+            err.to_string()
+                .contains("usable open-loop windows for policy training")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
