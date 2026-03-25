@@ -3,6 +3,7 @@
 import initWasm, { DemoRuntime } from '../wasm/pkg/gpc_wasm.js'
 import type {
   MissionPlayback,
+  PlannerMode,
   RuntimeBuildConfig,
   RuntimeSnapshot,
   WorkerRequest,
@@ -14,6 +15,17 @@ const workerScope: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalSco
 let runtimePromise: Promise<DemoRuntime> | null = null
 type DemoRuntimeApi = DemoRuntime & {
   rebuild(config: RuntimeBuildConfig): RuntimeSnapshot | Promise<RuntimeSnapshot>
+}
+
+function describePlannerMode(mode: PlannerMode) {
+  switch (mode) {
+    case 'policy':
+      return 'Generating the raw policy trajectory.'
+    case 'rank':
+      return 'Ranking candidate trajectories in the world model.'
+    case 'opt':
+      return 'Refining the selected candidate with gradient search.'
+  }
 }
 
 function postMessageSafe(message: WorkerResponse) {
@@ -61,7 +73,7 @@ async function simulate(request: Extract<WorkerRequest, { type: 'simulate' }>) {
   postMessageSafe({
     type: 'status',
     phase: 'planning',
-    message: 'Sampling candidates and ranking them in the world model.',
+    message: describePlannerMode(request.mode),
   })
   const playback = runtime.simulate_mission(
     request.missionId,

@@ -21,8 +21,32 @@ function formatSigned(value: number) {
   return `${value >= 0 ? '+' : ''}${value.toFixed(3)}`
 }
 
+function plannerModeLabel(mode: PlannerMode) {
+  switch (mode) {
+    case 'policy':
+      return 'policy'
+    case 'rank':
+      return 'ranked'
+    case 'opt':
+      return 'optimized'
+  }
+}
+
+function selectedPathForMode(frame: PlanningFrame, mode: PlannerMode) {
+  switch (mode) {
+    case 'policy':
+      return frame.policy_path
+    case 'rank':
+      return frame.ranked_path
+    case 'opt':
+      return frame.optimized_path
+  }
+}
+
 export function RobotStage({ mission, frame, mode }: RobotStageProps) {
-  const strategyPath = mode === 'opt' ? frame.optimized_path : frame.ranked_path
+  const strategyPath = selectedPathForMode(frame, mode)
+  const strategyLabel = plannerModeLabel(mode)
+  const showRankingTelemetry = mode !== 'policy'
   const rootStyle = { '--mission-accent': mission.accent } as CSSProperties
 
   return (
@@ -33,13 +57,18 @@ export function RobotStage({ mission, frame, mode }: RobotStageProps) {
           <strong>
             step {frame.step + 1}/{mission.max_steps}
           </strong>
+          <span className="robot-stage__mode mono">{strategyLabel} path</span>
         </div>
         <div className="robot-stage__legend">
           <span className="robot-stage__legend-item" data-color="executed">executed</span>
-          <span className="robot-stage__legend-item" data-color="ranked">ranked</span>
-          <span className="robot-stage__legend-item" data-color="optimized">optimized</span>
           <span className="robot-stage__legend-item" data-color="policy">policy</span>
-          <span className="robot-stage__legend-item" data-color="candidates">candidates</span>
+          {showRankingTelemetry ? (
+            <>
+              <span className="robot-stage__legend-item" data-color="ranked">ranked</span>
+              <span className="robot-stage__legend-item" data-color="optimized">optimized</span>
+              <span className="robot-stage__legend-item" data-color="candidates">candidates</span>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -84,22 +113,28 @@ export function RobotStage({ mission, frame, mode }: RobotStageProps) {
         <circle cx="0" cy="-0.02" r="1.36" className="robot-stage__reach" />
 
         {/* candidate trajectories (ghost trails) */}
-        {frame.candidates
-          .slice()
-          .reverse()
-          .map((c) => (
-            <path
-              key={`c-${c.rank}`}
-              d={pathFromPoints(c.effector_path)}
-              className="robot-stage__candidate"
-              style={{ opacity: Math.max(0.06, 0.3 - c.rank * 0.035) } as CSSProperties}
-            />
-          ))}
+        {showRankingTelemetry
+          ? frame.candidates
+              .slice()
+              .reverse()
+              .map((c) => (
+                <path
+                  key={`c-${c.rank}`}
+                  d={pathFromPoints(c.effector_path)}
+                  className="robot-stage__candidate"
+                  style={{ opacity: Math.max(0.06, 0.3 - c.rank * 0.035) } as CSSProperties}
+                />
+              ))
+          : null}
 
         {/* strategy paths */}
         <path d={pathFromPoints(frame.policy_path)} className="robot-stage__policy" />
-        <path d={pathFromPoints(frame.ranked_path)} className="robot-stage__ranked" />
-        <path d={pathFromPoints(frame.optimized_path)} className="robot-stage__optimized" />
+        {showRankingTelemetry ? (
+          <>
+            <path d={pathFromPoints(frame.ranked_path)} className="robot-stage__ranked" />
+            <path d={pathFromPoints(frame.optimized_path)} className="robot-stage__optimized" />
+          </>
+        ) : null}
         <path d={pathFromPoints(strategyPath)} className="robot-stage__selected" filter="url(#pathGlow)" />
 
         {/* executed path */}

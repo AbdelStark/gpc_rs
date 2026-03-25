@@ -48,7 +48,7 @@ The demo visualizes the complete GPC inference loop at each planning step:
 | Visual | What it represents |
 |--------|--------------------|
 | Faint ghost paths | K candidate trajectories from the diffusion policy, rolled through the world model |
-| Orange dashed path | Raw policy sample (no evaluation) |
+| Orange dashed path | Raw policy sample (`GPC-POLICY`) with no world-model ranking |
 | Green path | GPC-RANK winner (highest-scoring candidate) |
 | Blue dashed path | GPC-OPT result (gradient-refined trajectory) |
 | Glowing path | Active strategy's selected trajectory |
@@ -56,7 +56,7 @@ The demo visualizes the complete GPC inference loop at each planning step:
 | Circular obstacles | Hazard zones penalized by the reward function |
 | Crosshair | Goal target |
 
-The control panel lets you switch between GPC-RANK and GPC-OPT, adjust the number of candidate rollouts (K), scrub through planning frames, and select different missions.
+The control panel lets you switch between `GPC-POLICY`, `GPC-RANK`, and `GPC-OPT`, adjust the number of candidate rollouts (K), scrub through planning frames, and select different missions. `GPC-POLICY` shows the raw diffusion-policy sample without evaluation; `GPC-RANK` selects the highest-scoring candidate; `GPC-OPT` refines a candidate trajectory with gradient search.
 
 See [docs/demo-explained.md](../docs/demo-explained.md) for the full explanation.
 

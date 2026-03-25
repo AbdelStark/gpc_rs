@@ -216,42 +216,82 @@ impl Engine {
             let policy_rollout = self.world_model.rollout(&current_tensor, &policy_actions)?;
             let policy_path = trajectory_path(&policy_rollout)?;
 
-            let candidate_actions = self.policy.sample_k(&obs_tensor, num_candidates, &device)?;
-            let repeated_state =
-                gpc_core::tensor_utils::repeat_batch_2d(&current_tensor, num_candidates);
-            let candidate_rollouts = self
-                .world_model
-                .rollout(&repeated_state, &candidate_actions)?;
-            let reward_tensor = reward.compute_reward(&candidate_rollouts)?;
+            let (
+                selected_actions,
+                selected_rollout,
+                ranked_path,
+                optimized_path,
+                candidates,
+                reward_mean,
+                reward_best,
+                reward_spread,
+            ) = if mode == PlannerMode::Policy {
+                (
+                    policy_actions,
+                    policy_rollout,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+            } else {
+                let candidate_actions =
+                    self.policy.sample_k(&obs_tensor, num_candidates, &device)?;
+                let repeated_state =
+                    gpc_core::tensor_utils::repeat_batch_2d(&current_tensor, num_candidates);
+                let candidate_rollouts = self
+                    .world_model
+                    .rollout(&repeated_state, &candidate_actions)?;
+                let reward_tensor = reward.compute_reward(&candidate_rollouts)?;
 
-            let candidate_summaries =
-                summarize_candidates(&candidate_rollouts, &reward_tensor, TOP_CANDIDATES)?;
-            let rank_actions =
-                select_rank_actions(&candidate_actions, &reward_tensor, num_candidates)?;
-            let ranked_rollout = self.world_model.rollout(&current_tensor, &rank_actions)?;
-            let ranked_path = trajectory_path(&ranked_rollout)?;
+                let candidate_summaries =
+                    summarize_candidates(&candidate_rollouts, &reward_tensor, TOP_CANDIDATES)?;
+                let rank_actions =
+                    select_rank_actions(&candidate_actions, &reward_tensor, num_candidates)?;
+                let ranked_rollout = self.world_model.rollout(&current_tensor, &rank_actions)?;
+                let ranked_path = trajectory_path(&ranked_rollout)?;
 
-            let optimized_actions = optimize_actions(
-                &self.world_model,
-                &reward,
-                &policy_actions,
-                &current_tensor,
-                self.opt_steps,
-            )?;
-            let optimized_rollout = self
-                .world_model
-                .rollout(&current_tensor, &optimized_actions)?;
-            let optimized_path = trajectory_path(&optimized_rollout)?;
+                let optimized_actions = optimize_actions(
+                    &self.world_model,
+                    &reward,
+                    &policy_actions,
+                    &current_tensor,
+                    self.opt_steps,
+                )?;
+                let optimized_rollout = self
+                    .world_model
+                    .rollout(&current_tensor, &optimized_actions)?;
+                let optimized_path = trajectory_path(&optimized_rollout)?;
 
-            let (selected_actions, selected_rollout) = select_mode_outputs(
-                mode,
-                policy_actions,
-                policy_rollout,
-                rank_actions,
-                ranked_rollout,
-                optimized_actions,
-                optimized_rollout,
-            );
+                let rewards = tensor_to_vec(reward_tensor)?;
+                let reward_best = rewards.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let reward_mean = rewards.iter().sum::<f32>() / rewards.len() as f32;
+                let reward_low = rewards.iter().copied().fold(f32::INFINITY, f32::min);
+                let reward_spread = reward_best - reward_low;
+
+                let (selected_actions, selected_rollout) = select_mode_outputs(
+                    mode,
+                    policy_actions,
+                    policy_rollout,
+                    rank_actions,
+                    ranked_rollout,
+                    optimized_actions,
+                    optimized_rollout,
+                );
+
+                (
+                    selected_actions,
+                    selected_rollout,
+                    ranked_path,
+                    optimized_path,
+                    candidate_summaries,
+                    reward_mean,
+                    reward_best,
+                    reward_spread,
+                )
+            };
 
             let selected_first_action = first_action(&selected_actions)?;
             let model_next_state = first_predicted_state(&selected_rollout)?;
@@ -271,12 +311,6 @@ impl Engine {
             let goal_distance = goal_distance_from_slice(&actual_state_vec);
             min_clearance = min_clearance.min(min_clearance_from_slice(&actual_state_vec));
 
-            let rewards = tensor_to_vec(reward_tensor)?;
-            let reward_best = rewards.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let reward_mean = rewards.iter().sum::<f32>() / rewards.len() as f32;
-            let reward_low = rewards.iter().copied().fold(f32::INFINITY, f32::min);
-            let reward_spread = reward_best - reward_low;
-
             frames.push(PlanningFrame {
                 step,
                 pose: forward_kinematics(current.theta1, current.theta2),
@@ -284,7 +318,7 @@ impl Engine {
                 policy_path,
                 ranked_path,
                 optimized_path,
-                candidates: candidate_summaries,
+                candidates,
                 selected_action: selected_first_action,
                 goal_distance,
                 min_clearance,
@@ -929,6 +963,13 @@ mod tests {
             .expect("policy playback should succeed");
         assert_eq!(policy_playback.summary.mode, "policy");
         assert!(!policy_playback.frames.is_empty());
+        let frame = &policy_playback.frames[0];
+        assert!(frame.candidates.is_empty());
+        assert!(frame.ranked_path.is_empty());
+        assert!(frame.optimized_path.is_empty());
+        assert_eq!(frame.reward_mean, 0.0);
+        assert_eq!(frame.reward_best, 0.0);
+        assert_eq!(frame.reward_spread, 0.0);
 
         let error = engine
             .simulate_mission(&mission.id, "invalid", 4)

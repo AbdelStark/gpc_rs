@@ -15,7 +15,9 @@ Built on [Burn](https://burn.dev) for training and [Tract](https://github.com/so
 
 A browser-based visualization of the full GPC pipeline running in real time against a 2-link robot arm navigating around obstacles.
 
-The native Rust server trains both models from synthetic demonstrations in ~1 second, then serves a REST API that the React frontend consumes to visualize closed-loop replanning: candidate trajectories from the diffusion policy, world-model rollouts, GPC-RANK selection, GPC-OPT refinement, and the resulting executed path.
+The native Rust server trains both models from synthetic demonstrations in ~1 second, then serves a REST API that the React frontend consumes to visualize closed-loop replanning: candidate trajectories from the diffusion policy, the raw policy baseline, world-model rollouts, GPC-RANK selection, GPC-OPT refinement, and the resulting executed path.
+
+The demo lets you switch between `policy`, `rank`, and `opt` planner modes. `policy` shows the unscored diffusion sample directly, `rank` evaluates K candidates and selects the best one, and `opt` starts from a policy sample and refines it with the world model.
 
 ```bash
 # Terminal 1 — start the planner server
@@ -73,7 +75,8 @@ Inference (per step, closed-loop):
 2. **World model** rolls each candidate forward, predicting future states step by step.
 3. **Reward function** scores each imagined trajectory (progress, goal proximity, obstacle clearance).
 4. **GPC-RANK** selects the highest-scoring candidate. **GPC-OPT** gradient-refines a candidate; CLI evaluation uses Burn autodiff while the demo runtimes keep a finite-difference fallback.
-5. Only the first action of the winning trajectory executes. The system replans from the actual state every step.
+5. **Policy baseline** executes the raw diffusion-policy sample with no ranking or refinement. This is useful as a sanity check for what the generative policy proposes before evaluation.
+6. Only the first action of the selected trajectory executes. The system replans from the actual state every step.
 
 ## Scope
 

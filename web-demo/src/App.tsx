@@ -20,7 +20,7 @@ import type {
   PlanningFrame,
   RuntimeSnapshot,
 } from './types'
-import { DEFAULT_RUNTIME_BUILD_CONFIG } from './types'
+import { DEFAULT_RUNTIME_BUILD_CONFIG, PLANNER_MODES } from './types'
 
 const NUMBER_INPUT_STYLE: CSSProperties = {
   border: '1px solid var(--line)',
@@ -46,6 +46,35 @@ const SETTINGS_FIELD_STYLE: CSSProperties = {
   gap: '0.28rem',
 }
 
+const PLANNER_MODE_COPY: Record<
+  PlannerMode,
+  {
+    label: string
+    button: string
+    summary: string
+    status: string
+  }
+> = {
+  policy: {
+    label: 'Policy',
+    button: 'GPC-POLICY',
+    summary: 'Raw diffusion sample, executed without world-model ranking.',
+    status: 'policy sample',
+  },
+  rank: {
+    label: 'Rank',
+    button: 'GPC-RANK',
+    summary: 'World-model scoring picks the best sampled trajectory.',
+    status: 'ranked trajectory',
+  },
+  opt: {
+    label: 'Optimize',
+    button: 'GPC-OPT',
+    summary: 'Gradient refinement sharpens the selected candidate.',
+    status: 'optimized trajectory',
+  },
+}
+
 function normalizeRuntimeBuildConfig(config: RuntimeBuildConfig): RuntimeBuildConfig {
   return {
     dataset_seed: clampInteger(config.dataset_seed, 0),
@@ -66,6 +95,26 @@ function clampInteger(value: number, minimum: number) {
   }
 
   return Math.max(minimum, Math.trunc(value))
+}
+
+function plannerModeLabel(mode: PlannerMode) {
+  return PLANNER_MODE_COPY[mode].label
+}
+
+function plannerModeSummary(mode: PlannerMode) {
+  return PLANNER_MODE_COPY[mode].summary
+}
+
+function plannerModeButtonLabel(mode: PlannerMode) {
+  return PLANNER_MODE_COPY[mode].button
+}
+
+function plannerModeStatus(mode: PlannerMode) {
+  return PLANNER_MODE_COPY[mode].status
+}
+
+function hasRankingTelemetry(mode: PlannerMode) {
+  return mode !== 'policy'
 }
 
 function App() {
@@ -161,7 +210,9 @@ function App() {
     async function runSimulation(currentClient: PlannerClient) {
       setSimulating(true)
       setError(null)
-      setStatusMessage(`Planning with ${formatPlannerSource(currentClient.source)}…`)
+      setStatusMessage(
+        `Planning ${plannerModeStatus(mode)} with ${formatPlannerSource(currentClient.source)}…`,
+      )
 
       try {
         const result = await currentClient.simulate(missionId, mode, deferredCandidates)
@@ -175,7 +226,9 @@ function App() {
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Simulation failed')
-          setStatusMessage(`Planning failed with ${formatPlannerSource(currentClient.source)}.`)
+          setStatusMessage(
+            `Planning ${plannerModeStatus(mode)} failed with ${formatPlannerSource(currentClient.source)}.`,
+          )
         }
       } finally {
         if (!cancelled) setSimulating(false)
@@ -249,6 +302,8 @@ function App() {
   const frames = playback?.frames ?? []
   const currentFrame: PlanningFrame | null =
     frames[Math.min(frameIndex, Math.max(frames.length - 1, 0))] ?? null
+  const displayedMode = playback ? playback.summary.mode : mode
+  const rankingTelemetryVisible = hasRankingTelemetry(displayedMode)
   const stageReady = Boolean(currentMission && currentFrame && playback)
 
   return (
@@ -282,7 +337,7 @@ function App() {
       <div className="demo-layout">
         <div className="demo-layout__stage">
           {stageReady && currentMission && currentFrame ? (
-            <RobotStage frame={currentFrame} mission={currentMission} mode={mode} />
+            <RobotStage frame={currentFrame} mission={currentMission} mode={displayedMode} />
           ) : (
             <section className="robot-stage--loading">
               <div className="robot-stage__loading">
@@ -502,39 +557,60 @@ function App() {
           <section className="control-card">
             <div className="control-card__header">
               <p>Planner</p>
-              <strong>{mode === 'rank' ? 'Rank' : 'Optimize'}</strong>
+              <strong>{plannerModeLabel(mode)}</strong>
             </div>
             <div className="mode-toggle" role="tablist" aria-label="Planner mode">
-              <button
-                className={mode === 'rank' ? 'mode-toggle__button is-active' : 'mode-toggle__button'}
-                disabled={simulating || rebuilding}
-                onClick={() => setMode('rank')}
-                type="button"
-              >
-                GPC-RANK
-              </button>
-              <button
-                className={mode === 'opt' ? 'mode-toggle__button is-active' : 'mode-toggle__button'}
-                disabled={simulating || rebuilding}
-                onClick={() => setMode('opt')}
-                type="button"
-              >
-                GPC-OPT
-              </button>
+              {PLANNER_MODES.map((plannerMode) => (
+                <button
+                  key={plannerMode}
+                  aria-pressed={mode === plannerMode}
+                  className={
+                    mode === plannerMode ? 'mode-toggle__button is-active' : 'mode-toggle__button'
+                  }
+                  disabled={simulating || rebuilding}
+                  onClick={() => setMode(plannerMode)}
+                  type="button"
+                >
+                  {plannerModeButtonLabel(plannerMode)}
+                </button>
+              ))}
             </div>
-            <label className="slider-field">
-              <span>candidates</span>
-              <strong>{deferredCandidates}</strong>
-              <input
-                disabled={simulating || rebuilding}
-                max={28}
-                min={8}
-                onChange={(e) => setCandidateCount(Number(e.target.value))}
-                step={1}
-                type="range"
-                value={candidateCount}
-              />
-            </label>
+            <p
+              style={{
+                color: 'var(--t3)',
+                fontSize: '0.72rem',
+                lineHeight: 1.45,
+                margin: '0.55rem 0 0',
+              }}
+            >
+              {plannerModeSummary(mode)}
+            </p>
+            {rankingTelemetryVisible ? (
+              <label className="slider-field">
+                <span>candidates</span>
+                <strong>{deferredCandidates}</strong>
+                <input
+                  disabled={simulating || rebuilding}
+                  max={28}
+                  min={8}
+                  onChange={(e) => setCandidateCount(Number(e.target.value))}
+                  step={1}
+                  type="range"
+                  value={candidateCount}
+                />
+              </label>
+            ) : (
+              <p
+                style={{
+                  color: 'var(--t3)',
+                  fontSize: '0.72rem',
+                  lineHeight: 1.45,
+                  margin: '0.55rem 0 0',
+                }}
+              >
+                Policy playback does not use candidate ranking telemetry.
+              </p>
+            )}
           </section>
 
           {/* playback */}
@@ -562,7 +638,7 @@ function App() {
               type="range"
               value={Math.min(frameIndex, Math.max(frames.length - 1, 0))}
             />
-            {currentFrame ? (
+            {rankingTelemetryVisible && currentFrame ? (
               <div className="stat-inline">
                 <div>
                   <span>spread</span>
@@ -573,29 +649,53 @@ function App() {
                   <strong className="mono">{currentFrame.reward_best.toFixed(3)}</strong>
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <p
+                style={{
+                  color: 'var(--t3)',
+                  fontSize: '0.72rem',
+                  lineHeight: 1.45,
+                  margin: '0.55rem 0 0',
+                }}
+              >
+                Reward telemetry is hidden for policy playback.
+              </p>
+            )}
           </section>
 
           {/* top candidates */}
           <section className="control-card">
             <div className="control-card__header">
               <p>Top trajectories</p>
-              <strong>{currentFrame?.candidates.length ?? 0}</strong>
+              <strong>{rankingTelemetryVisible ? currentFrame?.candidates.length ?? 0 : '—'}</strong>
             </div>
-            <div className="ranking-list">
-              {currentFrame?.candidates.map((c) => (
-                <article className="ranking-row" key={c.rank}>
-                  <div>
-                    <p>#{c.rank}</p>
-                    <strong className="mono">{c.reward.toFixed(3)}</strong>
-                  </div>
-                  <div>
-                    <span>{c.clearance.toFixed(3)}</span>
-                    <span>{c.terminal_distance.toFixed(3)}</span>
-                  </div>
-                </article>
-              ))}
-            </div>
+            {rankingTelemetryVisible ? (
+              <div className="ranking-list">
+                {currentFrame?.candidates.map((c) => (
+                  <article className="ranking-row" key={c.rank}>
+                    <div>
+                      <p>#{c.rank}</p>
+                      <strong className="mono">{c.reward.toFixed(3)}</strong>
+                    </div>
+                    <div>
+                      <span>{c.clearance.toFixed(3)}</span>
+                      <span>{c.terminal_distance.toFixed(3)}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p
+                style={{
+                  color: 'var(--t3)',
+                  fontSize: '0.72rem',
+                  lineHeight: 1.45,
+                  margin: 0,
+                }}
+              >
+                Policy playback does not expose ranked candidates.
+              </p>
+            )}
           </section>
         </aside>
       </div>
@@ -657,23 +757,41 @@ function App() {
 
       {/* ── summary strip ────────────────────────── */}
       {playback ? (
-        <section className="summary-strip">
+        <section
+          className="summary-strip"
+          style={{
+            gridTemplateColumns: rankingTelemetryVisible ? 'repeat(5, 1fr)' : 'repeat(4, 1fr)',
+          }}
+        >
           <article>
             <p>outcome</p>
             <strong>{playback.summary.success ? 'goal reached' : 'replan limit'}</strong>
           </article>
           <article>
+            <p>planner mode</p>
+            <strong>{plannerModeLabel(displayedMode)}</strong>
+          </article>
+          <article>
             <p>final distance</p>
             <strong className="mono">{playback.summary.final_goal_distance.toFixed(3)}</strong>
           </article>
-          <article>
-            <p>min clearance</p>
-            <strong className="mono">{playback.summary.min_clearance.toFixed(3)}</strong>
-          </article>
-          <article>
-            <p>forecast error</p>
-            <strong className="mono">{playback.summary.average_world_error.toFixed(3)}</strong>
-          </article>
+          {rankingTelemetryVisible ? (
+            <>
+              <article>
+                <p>min clearance</p>
+                <strong className="mono">{playback.summary.min_clearance.toFixed(3)}</strong>
+              </article>
+              <article>
+                <p>forecast error</p>
+                <strong className="mono">{playback.summary.average_world_error.toFixed(3)}</strong>
+              </article>
+            </>
+          ) : (
+            <article>
+              <p>forecast error</p>
+              <strong className="mono">{playback.summary.average_world_error.toFixed(3)}</strong>
+            </article>
+          )}
         </section>
       ) : null}
 

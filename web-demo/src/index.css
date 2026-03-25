@@ -188,14 +188,23 @@ button { cursor: pointer; }
 
 .robot-stage__header-left {
   display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
 }
 
 .robot-stage__header-left strong {
   font-family: 'Syne', sans-serif;
   font-size: 1rem;
   letter-spacing: -0.02em;
+}
+
+.robot-stage__mode {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--t3);
 }
 
 .robot-stage__legend {
@@ -527,7 +536,7 @@ button { cursor: pointer; }
 
 .mode-toggle {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.35rem;
   background: var(--s1);
   border-radius: var(--radius-md);
@@ -839,7 +848,7 @@ input[type="range"]::-moz-range-thumb {
 
 .summary-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.75rem;
   margin-top: 0.75rem;
 }

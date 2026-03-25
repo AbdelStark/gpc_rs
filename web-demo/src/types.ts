@@ -1,4 +1,6 @@
-export type PlannerMode = 'rank' | 'opt'
+export type PlannerMode = 'policy' | 'rank' | 'opt'
+
+export const PLANNER_MODES: PlannerMode[] = ['policy', 'rank', 'opt']
 
 export interface RuntimeBuildConfig {
   dataset_seed: number
@@ -87,7 +89,7 @@ export interface MissionSummary {
   min_clearance: number
   average_world_error: number
   executed_steps: number
-  mode: string
+  mode: PlannerMode
 }
 
 export interface MissionPlayback {

@@ -1,6 +1,6 @@
 # GPC Web Demo — What It Shows and Why
 
-This document explains what the interactive web demo demonstrates, from first principles up through the full GPC framework. It is written for anyone who wants to understand the paper, the Rust implementation, and how every visual element in the demo maps to a concept from the research.
+This document explains what the interactive web demo demonstrates, from first principles up through the full GPC framework. It is written for anyone who wants to understand the paper, the Rust implementation, and how every visual element in the demo maps to a concept from the research. The demo exposes three planner modes: `policy`, `rank`, and `opt`.
 
 **Paper:** [Generative Robot Policies via Predictive World Modeling](https://arxiv.org/pdf/2502.00622) (arXiv 2502.00622)
 
@@ -64,9 +64,19 @@ Phase 2 is critical because single-step errors compound over 6 prediction steps.
 
 ---
 
-## The Evaluation Strategies
+## The Planner Modes
 
-The policy proposes. The world model imagines consequences. Now you need a way to score and select.
+The policy proposes. The world model imagines consequences. The planner mode determines whether the demo shows the raw proposal, ranks multiple proposals, or refines one with gradient search.
+
+### Policy Baseline
+
+This is the raw diffusion sample, shown without ranking or refinement.
+
+1. Sample one action sequence from the policy
+2. Roll it through the world model
+3. Execute the first action from that sample
+
+The policy mode is useful as a baseline: it shows exactly what the generative policy proposes before the evaluator changes anything. In the demo, the orange dashed path is the raw policy trajectory, and the bright selected path follows that same line when `policy` is active.
 
 ### GPC-RANK
 
@@ -88,7 +98,7 @@ reward = 1.8 × progress_toward_goal
 
 It rewards trajectories that make progress, get close to the goal, avoid obstacles, and maintain safe clearance. The collision penalty multiplier (4.4×) is severe because in real robotics, collisions are catastrophic.
 
-**The key tradeoff:** More candidates = better coverage of the policy distribution, but more compute. The slider in the demo lets you see this tradeoff directly.
+**The key tradeoff:** More candidates = better coverage of the policy distribution, but more compute. The slider in the demo lets you see this tradeoff directly when `rank` is selected.
 
 **In the demo:** The green/lime path is the RANK winner. The "top trajectories" panel on the right shows the full ranking table — each candidate's reward, clearance, and terminal distance.
 
@@ -178,11 +188,11 @@ Training demonstrations come from a hand-coded expert controller:
 
 | Visual | CSS Class | Paper Concept |
 |--------|-----------|---------------|
-| Cluster of faint paths, fading by rank | `robot-stage__candidate` | The K sampled trajectories — each is a diffusion policy sample rolled through the world model |
-| Orange dashed line | `robot-stage__policy` | A single raw policy sample (no evaluation) — what you'd get without GPC |
+| Cluster of faint paths, fading by rank | `robot-stage__candidate` | The K sampled trajectories used by `rank` and `opt` — each is a diffusion policy sample rolled through the world model |
+| Orange dashed line | `robot-stage__policy` | The raw policy sample — the `policy` mode baseline with no evaluation |
 | Green/lime solid line | `robot-stage__ranked` | The GPC-RANK winner: highest reward among K candidates |
 | Blue dashed line | `robot-stage__optimized` | The GPC-OPT result: the gradient-refined trajectory |
-| Bright glowing line | `robot-stage__selected` | Whichever strategy is active — the trajectory whose first action will execute |
+| Bright glowing line | `robot-stage__selected` | The active planner mode's selected trajectory, whether that is `policy`, `rank`, or `opt` |
 | White trail | `robot-stage__executed` | Ground truth — the actual closed-loop path composed of first-actions from many replanning cycles |
 | Filled circles with outer rings | `robot-stage__obstacle` | Collision hazard zones that the reward function penalizes |
 | Crosshair target | `robot-stage__goal` | The target position the reward function pulls toward |
@@ -193,9 +203,9 @@ Training demonstrations come from a hand-coded expert controller:
 
 | Control | Paper Concept |
 |---------|---------------|
-| GPC-RANK / GPC-OPT toggle | The two evaluator strategies from the paper |
-| Candidates slider (8–28) | K in GPC-RANK — trades compute for coverage of the policy distribution |
-| Top trajectories list | The ranking table GPC-RANK uses to select the winner |
+| Policy / RANK / OPT toggle | The three planner modes exposed by the demo |
+| Candidates slider (8–28) | K in `rank` and `opt` — trades compute for coverage of the policy distribution |
+| Top trajectories list | The ranking table used by `rank`; hidden or inactive in `policy` mode |
 | Reward spread | How discriminative the world model is across candidates |
 | Best reward | The score of the winning trajectory |
 
@@ -229,6 +239,8 @@ Inference (per step, closed-loop):
 
   obs_history [1, 2, 12]
       │
+      ├── policy.sample() ──→ [1, 6, 2] raw policy actions
+      │
       ├── policy.sample_k(K=18) ──→ [18, 6, 2] candidate action sequences
       │           │
       │           ▼
@@ -237,8 +249,9 @@ Inference (per step, closed-loop):
       │           ▼
       │   ArenaReward.compute_reward() ──→ [18] scalar scores
       │           │
-      │           ├── GPC-RANK: argmax ──→ best_actions [1, 6, 2]
-      │           └── GPC-OPT:  finite-diff gradient ascent ──→ refined_actions [1, 6, 2]
+      │           ├── `policy`: execute raw policy actions
+      │           ├── `rank`: argmax ──→ best_actions [1, 6, 2]
+      │           └── `opt`: finite-diff gradient ascent ──→ refined_actions [1, 6, 2]
       │                     │
       │                     ▼
       └───── execute first action only: [Δθ₁, Δθ₂]
@@ -269,7 +282,7 @@ cd web-demo && npm run dev
 
 The server trains both models from synthetic expert demonstrations on startup, then serves two REST endpoints:
 - `GET /api/snapshot` — runtime overview (training stats, loss curves, missions)
-- `POST /api/simulate` — runs the closed-loop replanning for a selected mission and returns all planning frames
+- `POST /api/simulate` — runs the closed-loop replanning for a selected mission and planner mode (`policy`, `rank`, or `opt`) and returns all planning frames
 
 The frontend polls for server readiness, fetches the snapshot, then triggers a simulation whenever you change the mission, planner mode, or candidate count.
 
@@ -280,7 +293,7 @@ The frontend polls for server readiness, fetches the snapshot, then triggers a s
 The demo is a **complete, end-to-end implementation of the GPC paper** running in real time:
 
 1. **Train** a world model and a diffusion policy from synthetic expert demonstrations
-2. **At each step:** generate diverse candidate futures via diffusion → imagine consequences via world model → score and select → execute only the first action → replan from actual state
+2. **At each step:** either inspect the raw policy baseline or generate diverse candidate futures via diffusion → imagine consequences via world model → score and select/refine → execute only the first action → replan from actual state
 3. **Visualize** the entire reasoning process: what the policy proposes, what the world model predicts, what the evaluator selects, and what actually happens
 
 The fundamental claim of the paper is that this decomposition — generative proposals + learned forward simulation + scoring — produces more robust behavior than any single end-to-end policy. The demo lets you watch that claim play out in real time: the ghost trajectories scatter, the world model ranks them, the best one executes, and the arm navigates around obstacles to reach the goal.
