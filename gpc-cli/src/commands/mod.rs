@@ -7,6 +7,7 @@ mod demo_pipeline;
 mod demo_tui;
 mod eval;
 mod init_config;
+mod reporting;
 mod train;
 
 pub use benchmark::{BenchmarkArgs, run_benchmark};

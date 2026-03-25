@@ -1,7 +1,6 @@
 //! Benchmark command implementation.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use burn::backend::Autodiff;
@@ -13,10 +12,12 @@ use serde::Serialize;
 use gpc_core::config::GpcConfig;
 
 use super::eval::{
-    CheckpointEvalSettings, EvalArgs, EvaluationReport, EvaluationStrategy,
-    evaluate_synthetic_closed_loop, generate_synthetic_episodes, load_models,
-    validate_episodes_for_closed_loop,
+    CheckpointEvalSettings, EvalArgs, EvaluationMode, EvaluationReport, EvaluationStrategy,
+    evaluate_synthetic_closed_loop, evaluate_windows, generate_synthetic_episodes,
+    load_evaluation_windows, load_models, resolved_policy_checkpoint_path,
+    resolved_world_model_checkpoint_path, validate_episodes_for_closed_loop,
 };
+use super::reporting::write_json_report;
 
 type BenchmarkBackend = Autodiff<NdArray>;
 
@@ -38,6 +39,14 @@ pub struct BenchmarkArgs {
     /// Explicit path to a world model checkpoint.
     #[arg(long)]
     world_model_checkpoint: Option<String>,
+
+    /// Path to training data directory or episodes.json.
+    #[arg(long)]
+    data: Option<String>,
+
+    /// Force synthetic benchmarking data even when `--data` is set.
+    #[arg(long)]
+    synthetic: bool,
 
     /// Strategy to include in the suite. Repeat to benchmark a subset.
     #[arg(long = "strategy")]
@@ -74,7 +83,7 @@ pub struct BenchmarkArgs {
 
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkRun {
-    seed: u64,
+    seed: Option<u64>,
     report: EvaluationReport,
 }
 
@@ -105,9 +114,11 @@ struct BenchmarkSummary {
 
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkReport {
+    mode: EvaluationMode,
     checkpoint_dir: String,
     policy_checkpoint: Option<String>,
     world_model_checkpoint: Option<String>,
+    data: Option<String>,
     strategies: Vec<EvaluationStrategy>,
     seeds: Vec<u64>,
     episodes_per_seed: usize,
@@ -180,7 +191,12 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     };
 
     let strategies = parse_strategies(&args.strategies)?;
-    let seeds = resolve_seeds(&args, &config);
+    let mode = if args.synthetic || args.data.is_none() {
+        EvaluationMode::SyntheticClosedLoop
+    } else {
+        EvaluationMode::DatasetOpenLoop
+    };
+    let seeds = resolve_seeds(&args, &config, mode);
     let num_candidates = args
         .num_candidates
         .unwrap_or(config.gpc_rank.num_candidates)
@@ -200,62 +216,96 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
         checkpoint_dir: args.checkpoint_dir.clone(),
         policy_checkpoint: args.policy_checkpoint.clone(),
         world_model_checkpoint: args.world_model_checkpoint.clone(),
-        data: None,
-        synthetic: true,
+        data: args.data.clone(),
+        synthetic: args.synthetic,
         episodes: args.episodes,
         episode_length: args.episode_length,
         num_candidates: Some(num_candidates),
         opt_steps: Some(opt_steps),
         opt_learning_rate: Some(opt_learning_rate),
         seed: None,
+        output: None,
+        details_output: None,
         demo: false,
     };
 
     let device = <BenchmarkBackend as Backend>::Device::default();
     let models = load_models(&eval_args, &device)?;
-    let mut per_run = Vec::with_capacity(strategies.len() * seeds.len());
+    let mut per_run = Vec::with_capacity(strategies.len() * seeds.len().max(1));
     let episode_length = args
         .episode_length
         .max(models.policy_config.pred_horizon + 1);
     let episodes_per_seed = args.episodes.max(1);
 
-    for &seed in &seeds {
-        let episodes = generate_synthetic_episodes(
-            models.world_model_config.state_dim,
-            models.world_model_config.action_dim,
-            models.policy_config.obs_dim,
-            episode_length,
-            episodes_per_seed,
-            seed,
-        );
-        validate_episodes_for_closed_loop(
-            &episodes,
-            &models.policy_config,
-            &models.world_model_config,
-        )?;
+    match mode {
+        EvaluationMode::SyntheticClosedLoop => {
+            for &seed in &seeds {
+                let episodes = generate_synthetic_episodes(
+                    models.world_model_config.state_dim,
+                    models.world_model_config.action_dim,
+                    models.policy_config.obs_dim,
+                    episode_length,
+                    episodes_per_seed,
+                    seed,
+                );
+                validate_episodes_for_closed_loop(
+                    &episodes,
+                    &models.policy_config,
+                    &models.world_model_config,
+                )?;
 
-        for strategy in &strategies {
-            let report = evaluate_synthetic_closed_loop(
-                &models,
-                &episodes,
-                CheckpointEvalSettings {
-                    strategy: *strategy,
+                for strategy in &strategies {
+                    let report = evaluate_synthetic_closed_loop(
+                        &models,
+                        &episodes,
+                        CheckpointEvalSettings {
+                            strategy: *strategy,
+                            num_candidates,
+                            opt_steps,
+                            opt_learning_rate,
+                        },
+                        seed,
+                        &device,
+                    )?;
+                    per_run.push(BenchmarkRun {
+                        seed: Some(seed),
+                        report,
+                    });
+                }
+            }
+        }
+        EvaluationMode::DatasetOpenLoop => {
+            let windows = load_evaluation_windows(&eval_args, &models)?;
+            for strategy in &strategies {
+                let report = evaluate_windows(
+                    &models,
+                    &windows,
+                    *strategy,
                     num_candidates,
                     opt_steps,
                     opt_learning_rate,
-                },
-                seed,
-                &device,
-            )?;
-            per_run.push(BenchmarkRun { seed, report });
+                    &device,
+                )?;
+                per_run.push(BenchmarkRun { seed: None, report });
+            }
         }
     }
 
     let summary = summarize_runs(&per_run);
     let report = BenchmarkReport {
+        mode,
         checkpoint_dir: args.checkpoint_dir.clone(),
-        policy_checkpoint: args.policy_checkpoint.clone(),
-        world_model_checkpoint: args.world_model_checkpoint.clone(),
+        policy_checkpoint: Some(
+            resolved_policy_checkpoint_path(&eval_args)
+                .to_string_lossy()
+                .to_string(),
+        ),
+        world_model_checkpoint: Some(
+            resolved_world_model_checkpoint_path(&eval_args)
+                .to_string_lossy()
+                .to_string(),
+        ),
+        data: args.data.clone(),
         strategies,
         seeds,
         episodes_per_seed,
@@ -270,7 +320,7 @@ pub fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     log_benchmark_report(&report);
 
     if let Some(output_path) = &args.output {
-        write_report(output_path, &report)?;
+        write_json_report(output_path, &report)?;
         tracing::info!("Benchmark JSON written to {}", output_path);
     }
 
@@ -297,7 +347,11 @@ fn parse_strategies(values: &[String]) -> Result<Vec<EvaluationStrategy>> {
     Ok(strategies)
 }
 
-fn resolve_seeds(args: &BenchmarkArgs, config: &GpcConfig) -> Vec<u64> {
+fn resolve_seeds(args: &BenchmarkArgs, config: &GpcConfig, mode: EvaluationMode) -> Vec<u64> {
+    if mode == EvaluationMode::DatasetOpenLoop {
+        return Vec::new();
+    }
+
     if !args.seeds.is_empty() {
         return args.seeds.clone();
     }
@@ -349,9 +403,15 @@ fn summarize_runs(runs: &[BenchmarkRun]) -> Vec<BenchmarkSummary> {
 
 fn log_benchmark_report(report: &BenchmarkReport) {
     tracing::info!("Checkpoint benchmark complete");
-    tracing::info!("  seeds: {:?}", report.seeds);
-    tracing::info!("  episodes per seed: {}", report.episodes_per_seed);
-    tracing::info!("  episode length: {}", report.episode_length);
+    tracing::info!("  mode: {}", report.mode.label());
+    if let Some(data) = &report.data {
+        tracing::info!("  data: {}", data);
+    }
+    if report.mode == EvaluationMode::SyntheticClosedLoop {
+        tracing::info!("  seeds: {:?}", report.seeds);
+        tracing::info!("  episodes per seed: {}", report.episodes_per_seed);
+        tracing::info!("  episode length: {}", report.episode_length);
+    }
     tracing::info!("  num candidates: {}", report.num_candidates);
     tracing::info!("  opt steps: {}", report.opt_steps);
     tracing::info!("  opt learning rate: {:.6}", report.opt_learning_rate);
@@ -380,19 +440,6 @@ fn log_benchmark_report(report: &BenchmarkReport) {
     }
 }
 
-fn write_report(path: &str, report: &BenchmarkReport) -> Result<()> {
-    let path = PathBuf::from(path);
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(&path, serde_json::to_vec_pretty(report)?)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,7 +449,7 @@ mod tests {
     };
     use gpc_core::config::{NoiseScheduleConfig, PolicyConfig, TrainingConfig, WorldModelConfig};
     use gpc_train::{PolicyTrainer, WorldModelTrainer};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_benchmark_dir(name: &str) -> PathBuf {
@@ -536,6 +583,8 @@ mod tests {
             checkpoint_dir: dir.to_string_lossy().to_string(),
             policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
             world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: None,
+            synthetic: false,
             strategies: Vec::new(),
             seeds: vec![11, 17],
             episodes: 2,
@@ -571,6 +620,92 @@ mod tests {
         );
         assert_eq!(json["per_run"].as_array().unwrap().len(), 6);
         assert_eq!(json["summary"].as_array().unwrap().len(), 3);
+        assert_eq!(json["mode"].as_str().unwrap(), "synthetic-closed-loop");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn benchmark_supports_dataset_open_loop_mode() {
+        let dir = temp_benchmark_dir("dataset_mode");
+        let (policy_path, world_model_path) = save_tiny_checkpoints(&dir).unwrap();
+        let data_path = dir.join("episodes.json");
+        let output_path = dir.join("reports/dataset_benchmark.json");
+        let episodes = generate_synthetic_episodes(4, 2, 4, 8, 2, 23);
+        std::fs::write(&data_path, serde_json::to_vec(&episodes).unwrap()).unwrap();
+
+        let args = BenchmarkArgs {
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: Some(policy_path.to_string_lossy().to_string()),
+            world_model_checkpoint: Some(world_model_path.to_string_lossy().to_string()),
+            data: Some(data_path.to_string_lossy().to_string()),
+            synthetic: false,
+            strategies: vec!["rank".to_string(), "opt".to_string()],
+            seeds: vec![11, 17],
+            episodes: 2,
+            episode_length: 8,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: Some(0.05),
+            output: Some(output_path.to_string_lossy().to_string()),
+        };
+
+        run_benchmark(args).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
+
+        assert_eq!(json["mode"].as_str().unwrap(), "dataset-open-loop");
+        assert_eq!(json["seeds"].as_array().unwrap().len(), 0);
+        assert_eq!(json["per_run"].as_array().unwrap().len(), 2);
+        assert_eq!(json["summary"].as_array().unwrap().len(), 2);
+        assert!(
+            json["per_run"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|run| run["seed"].is_null())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn benchmark_reports_resolved_checkpoint_paths() {
+        let dir = temp_benchmark_dir("resolved_paths");
+        let (policy_path, world_model_path) = save_tiny_checkpoints(&dir).unwrap();
+        let output_path = dir.join("reports/resolved_paths.json");
+
+        let args = BenchmarkArgs {
+            config: None,
+            checkpoint_dir: dir.to_string_lossy().to_string(),
+            policy_checkpoint: None,
+            world_model_checkpoint: None,
+            data: None,
+            synthetic: true,
+            strategies: vec!["rank".to_string()],
+            seeds: vec![11],
+            episodes: 2,
+            episode_length: 8,
+            num_candidates: Some(4),
+            opt_steps: Some(2),
+            opt_learning_rate: Some(0.05),
+            output: Some(output_path.to_string_lossy().to_string()),
+        };
+
+        run_benchmark(args).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
+        assert_eq!(
+            json["policy_checkpoint"].as_str().unwrap(),
+            policy_path.to_string_lossy()
+        );
+        assert_eq!(
+            json["world_model_checkpoint"].as_str().unwrap(),
+            world_model_path.to_string_lossy()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

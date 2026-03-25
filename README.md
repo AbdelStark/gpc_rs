@@ -166,8 +166,8 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | --- | --- | --- |
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
 | `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json` |
-| `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` strategies against synthetic or JSON datasets; `--demo` still runs random-model smoke tests |
-| `benchmark` | Compare `policy`, `rank`, and `opt` on a deterministic synthetic suite | Aggregates multi-seed closed-loop metrics and can emit JSON for regressions |
+| `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` against synthetic or JSON datasets; `-o/--output` writes a summary JSON artifact and `--details-output` writes detailed telemetry |
+| `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks and can emit JSON for regressions |
 | `checkpoint` | Inspect `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `convert` round-trips Burn policy/world-model checkpoints |
 | `init-config` | Write a default JSON config file | Prints the generated config to stdout |
 
@@ -194,8 +194,14 @@ cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --strate
 # Evaluate checkpoints against a dataset directory or episodes.json
 cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --data data --strategy rank --num-candidates 64
 
+# Save evaluation summary and detailed telemetry artifacts
+cargo run -p world-models-gpc-cli -- eval --checkpoint-dir runs/exp-001 --strategy rank --synthetic --episodes 8 --episode-length 24 --seed 42 --num-candidates 64 --output runs/exp-001/eval-rank-summary.json --details-output runs/exp-001/eval-rank-details.json
+
 # Run a multi-seed closed-loop benchmark and save JSON output
 cargo run -p world-models-gpc-cli -- benchmark --checkpoint-dir runs/exp-001 --episodes 8 --episode-length 24 --seed 42 --seed 43 --seed 44 --num-candidates 64 --opt-steps 10 --opt-learning-rate 0.01 --output runs/exp-001/benchmark.json
+
+# Benchmark dataset windows instead of synthetic closed-loop episodes
+cargo run -p world-models-gpc-cli -- benchmark --checkpoint-dir runs/exp-001 --data data --strategy rank --strategy opt --num-candidates 64 --opt-steps 10 --opt-learning-rate 0.01 --output runs/exp-001/dataset-benchmark.json
 
 # Run evaluator demos with random models
 cargo run -p world-models-gpc-cli -- eval --demo --strategy policy
@@ -307,7 +313,7 @@ CI workflow: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Limitations
 
-- `benchmark` currently targets deterministic synthetic closed-loop suites rather than paper-specific real-world task datasets.
+- `benchmark` supports deterministic synthetic closed-loop suites and dataset-backed open-loop windows, but not paper-specific real-world closed-loop task datasets yet.
 - `checkpoint convert` only covers Burn `.bin` and `.mpk` checkpoints for policy and world-model modules.
 
 ## References
