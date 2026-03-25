@@ -42,6 +42,50 @@ type InferBackend = NdArray;
 const TOP_CANDIDATES: usize = 7;
 const GOAL_SUCCESS_THRESHOLD: f32 = 0.1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlannerMode {
+    Policy,
+    Rank,
+    Opt,
+}
+
+impl PlannerMode {
+    fn parse(mode: &str) -> gpc_core::Result<Self> {
+        match mode {
+            "policy" => Ok(Self::Policy),
+            "rank" => Ok(Self::Rank),
+            "opt" => Ok(Self::Opt),
+            other => Err(gpc_core::GpcError::Config(format!(
+                "unsupported planner mode: {other} (expected policy, rank, or opt)"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::Rank => "rank",
+            Self::Opt => "opt",
+        }
+    }
+}
+
+fn select_mode_outputs(
+    mode: PlannerMode,
+    policy_actions: Tensor<InferBackend, 3>,
+    policy_rollout: Tensor<InferBackend, 3>,
+    rank_actions: Tensor<InferBackend, 3>,
+    ranked_rollout: Tensor<InferBackend, 3>,
+    optimized_actions: Tensor<InferBackend, 3>,
+    optimized_rollout: Tensor<InferBackend, 3>,
+) -> (Tensor<InferBackend, 3>, Tensor<InferBackend, 3>) {
+    match mode {
+        PlannerMode::Policy => (policy_actions, policy_rollout),
+        PlannerMode::Rank => (rank_actions, ranked_rollout),
+        PlannerMode::Opt => (optimized_actions, optimized_rollout),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ArenaReward;
 
@@ -160,6 +204,7 @@ impl Engine {
         mode: &str,
         num_candidates: usize,
     ) -> gpc_core::Result<MissionPlayback> {
+        let mode = PlannerMode::parse(mode)?;
         let mission = self
             .missions
             .iter()
@@ -213,18 +258,17 @@ impl Engine {
                 .rollout(&current_tensor, &optimized_actions)?;
             let optimized_path = trajectory_path(&optimized_rollout)?;
 
-            let selected_actions = if mode == "opt" {
-                optimized_actions
-            } else {
-                rank_actions
-            };
+            let (selected_actions, selected_rollout) = select_mode_outputs(
+                mode,
+                policy_actions,
+                policy_rollout,
+                rank_actions,
+                ranked_rollout,
+                optimized_actions,
+                optimized_rollout,
+            );
 
             let selected_first_action = first_action(&selected_actions)?;
-            let selected_rollout = if mode == "opt" {
-                optimized_rollout
-            } else {
-                ranked_rollout
-            };
             let model_next_state = first_predicted_state(&selected_rollout)?;
 
             for _ in 0..EXECUTION_STRIDE {
@@ -293,7 +337,7 @@ impl Engine {
                 min_clearance,
                 average_world_error,
                 executed_steps,
-                mode: mode.to_string(),
+                mode: mode.as_str().to_string(),
             },
         })
     }
@@ -328,10 +372,11 @@ async fn handle_simulate(
     let result = engine
         .simulate_mission(&request.mission_id, &request.mode, request.num_candidates)
         .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("simulation error: {error}"),
-            )
+            let status = match error {
+                gpc_core::GpcError::Config(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, format!("simulation error: {error}"))
         })?;
 
     Ok(Json(result))
@@ -889,5 +934,70 @@ mod tests {
         let engine = Engine::bootstrap(config.clone()).expect("bootstrap should succeed");
 
         assert_eq!(engine.snapshot().overview.build_config, config);
+    }
+
+    #[test]
+    fn select_mode_outputs_prefers_the_expected_branch() {
+        let device = <InferBackend as Backend>::Device::default();
+        let policy_actions = Tensor::<InferBackend, 3>::from_floats([[[1.0, 2.0]]], &device);
+        let policy_rollout = Tensor::<InferBackend, 3>::from_floats([[[3.0, 4.0]]], &device);
+        let rank_actions = Tensor::<InferBackend, 3>::from_floats([[[5.0, 6.0]]], &device);
+        let ranked_rollout = Tensor::<InferBackend, 3>::from_floats([[[7.0, 8.0]]], &device);
+        let optimized_actions = Tensor::<InferBackend, 3>::from_floats([[[9.0, 10.0]]], &device);
+        let optimized_rollout = Tensor::<InferBackend, 3>::from_floats([[[11.0, 12.0]]], &device);
+
+        let (selected_actions, selected_rollout) = select_mode_outputs(
+            PlannerMode::Policy,
+            policy_actions.clone(),
+            policy_rollout.clone(),
+            rank_actions.clone(),
+            ranked_rollout.clone(),
+            optimized_actions.clone(),
+            optimized_rollout.clone(),
+        );
+        assert_eq!(tensor_to_vec(selected_actions).unwrap(), vec![1.0, 2.0]);
+        assert_eq!(tensor_to_vec(selected_rollout).unwrap(), vec![3.0, 4.0]);
+
+        let (selected_actions, selected_rollout) = select_mode_outputs(
+            PlannerMode::Rank,
+            policy_actions.clone(),
+            policy_rollout.clone(),
+            rank_actions.clone(),
+            ranked_rollout.clone(),
+            optimized_actions.clone(),
+            optimized_rollout.clone(),
+        );
+        assert_eq!(tensor_to_vec(selected_actions).unwrap(), vec![5.0, 6.0]);
+        assert_eq!(tensor_to_vec(selected_rollout).unwrap(), vec![7.0, 8.0]);
+
+        let (selected_actions, selected_rollout) = select_mode_outputs(
+            PlannerMode::Opt,
+            policy_actions,
+            policy_rollout,
+            rank_actions,
+            ranked_rollout,
+            optimized_actions,
+            optimized_rollout,
+        );
+        assert_eq!(tensor_to_vec(selected_actions).unwrap(), vec![9.0, 10.0]);
+        assert_eq!(tensor_to_vec(selected_rollout).unwrap(), vec![11.0, 12.0]);
+    }
+
+    #[test]
+    fn simulate_mission_supports_policy_mode_and_rejects_invalid_modes() {
+        let engine = Engine::bootstrap(sample_config()).expect("bootstrap should succeed");
+        let mission = engine.missions[0].clone();
+        let policy_playback = engine
+            .simulate_mission(&mission.id, "policy", 4)
+            .expect("policy playback should succeed");
+        assert_eq!(policy_playback.summary.mode, "policy");
+        assert!(!policy_playback.frames.is_empty());
+
+        let error = engine
+            .simulate_mission(&mission.id, "invalid", 4)
+            .expect_err("invalid mode should fail");
+        assert!(
+            matches!(error, gpc_core::GpcError::Config(message) if message.contains("unsupported planner mode"))
+        );
     }
 }
