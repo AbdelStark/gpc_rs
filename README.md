@@ -168,7 +168,7 @@ cargo run -p world-models-gpc-cli -- demo --plain --epochs 1 --episodes 4 --epis
 | Command | Purpose | Notes |
 | --- | --- | --- |
 | `demo` | Run the end-to-end synthetic pipeline | Interactive TUI by default, `--plain` for log output |
-| `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json`; writes `train_report.json` under the output dir unless `--report-output` is set |
+| `train` | Train policy, world model, or both | Uses synthetic data or `DATA_DIR/episodes.json`; accepts explicit overrides for batch size, learning rate, weight decay, clipping, warmup, checkpoint cadence, log cadence, and seed; writes `train_report.json` under the output dir unless `--report-output` is set |
 | `eval` | Evaluate saved policy/world-model checkpoints | Supports `policy`, `rank`, or `opt` against synthetic or JSON datasets; `-o/--output` writes a summary JSON artifact and `--details-output` writes detailed telemetry |
 | `benchmark` | Compare `policy`, `rank`, and `opt` on checkpoint-backed suites | Runs deterministic synthetic closed-loop or dataset open-loop benchmarks, emits JSON, and can gate regressions against a saved baseline |
 | `checkpoint` | Inspect, verify, and convert `.onnx`, `.bin`, `.mpk`, and `.meta.json` files | `inspect` shows parsed config and file sizes; `verify` proves checkpoints reload cleanly |
@@ -182,6 +182,9 @@ cargo run -p world-models-gpc-cli -- init-config --output gpc_config.json
 
 # Train on synthetic data
 cargo run -p world-models-gpc-cli -- train --synthetic --component all --epochs 20
+
+# Override the effective training settings explicitly
+cargo run -p world-models-gpc-cli -- train --synthetic --component all --epochs 20 --batch-size 128 --learning-rate 5e-4 --weight-decay 1e-6 --grad-clip-norm 0.5 --warmup-steps 250 --checkpoint-every 25 --log-every 5 --seed 7
 
 # Train from a dataset directory
 cargo run -p world-models-gpc-cli -- train --data data --component world-model --epochs 50 --horizon 8
@@ -246,6 +249,8 @@ Use `--validation-split <fraction>` on `train` to hold out episodes for validati
 Within `gpc-train`, `TrainingConfig.seed` now seeds model initialization, minibatch shuffling, and policy diffusion noise/timestep sampling so repeated runs on the same backend/device are reproducible.
 
 `TrainingConfig.warmup_steps` now applies a linear per-optimizer-step learning-rate warmup, and `TrainingConfig.grad_clip_norm` enables AdamW norm clipping during policy and world-model training when set above `0.0`.
+
+The train CLI flags above override the effective `TrainingConfig` before dataset loading and training start, and the resulting `train_report.json` records the applied values verbatim.
 
 When `benchmark` is run with `--baseline <previous-report.json>`, the emitted JSON includes a `comparison` section for every shared strategy and the CLI can turn metric deltas into a hard failure via `--max-rollout-mse-increase`, `--max-terminal-distance-increase`, `--max-action-mse-increase`, `--max-reward-drop`, and `--max-success-rate-drop`.
 

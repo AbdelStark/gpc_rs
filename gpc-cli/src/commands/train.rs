@@ -53,6 +53,38 @@ pub struct TrainArgs {
     #[arg(long)]
     epochs: Option<usize>,
 
+    /// Batch size for training.
+    #[arg(long)]
+    batch_size: Option<usize>,
+
+    /// Learning rate for AdamW.
+    #[arg(long)]
+    learning_rate: Option<f64>,
+
+    /// Weight decay for AdamW.
+    #[arg(long)]
+    weight_decay: Option<f64>,
+
+    /// Gradient clipping max norm.
+    #[arg(long)]
+    grad_clip_norm: Option<f64>,
+
+    /// Warmup steps for the learning-rate schedule.
+    #[arg(long)]
+    warmup_steps: Option<usize>,
+
+    /// How often to save checkpoints, in epochs.
+    #[arg(long)]
+    checkpoint_every: Option<usize>,
+
+    /// How often to log metrics, in steps.
+    #[arg(long)]
+    log_every: Option<usize>,
+
+    /// Random seed for dataset generation and training.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// Use synthetic data for testing.
     #[arg(long)]
     synthetic: bool,
@@ -72,6 +104,30 @@ pub struct TrainArgs {
     /// Optional output path for a machine-readable JSON training report.
     #[arg(long)]
     report_output: Option<String>,
+}
+
+impl Default for TrainArgs {
+    fn default() -> Self {
+        Self {
+            config: None,
+            data: None,
+            component: "all".to_string(),
+            epochs: None,
+            batch_size: None,
+            learning_rate: None,
+            weight_decay: None,
+            grad_clip_norm: None,
+            warmup_steps: None,
+            checkpoint_every: None,
+            log_every: None,
+            seed: None,
+            synthetic: false,
+            output: "checkpoints".to_string(),
+            horizon: 8,
+            validation_split: 0.0,
+            report_output: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,10 +238,10 @@ pub fn run_train(args: TrainArgs) -> Result<()> {
         GpcConfig::default()
     };
 
-    let mut training_config = config.training.clone();
-    if let Some(epochs) = args.epochs {
-        training_config.num_epochs = epochs;
-    }
+    let mut config = config;
+    apply_training_overrides(&mut config.training, &args);
+    config.validate()?;
+    let training_config = config.training.clone();
 
     let device = <TrainBackend as burn::prelude::Backend>::Device::default();
 
@@ -737,6 +793,36 @@ fn validate_validation_split(validation_split: f32) -> Result<()> {
     Ok(())
 }
 
+fn apply_training_overrides(training_config: &mut TrainingConfig, args: &TrainArgs) {
+    if let Some(epochs) = args.epochs {
+        training_config.num_epochs = epochs;
+    }
+    if let Some(batch_size) = args.batch_size {
+        training_config.batch_size = batch_size;
+    }
+    if let Some(learning_rate) = args.learning_rate {
+        training_config.learning_rate = learning_rate;
+    }
+    if let Some(weight_decay) = args.weight_decay {
+        training_config.weight_decay = weight_decay;
+    }
+    if let Some(grad_clip_norm) = args.grad_clip_norm {
+        training_config.grad_clip_norm = grad_clip_norm;
+    }
+    if let Some(warmup_steps) = args.warmup_steps {
+        training_config.warmup_steps = warmup_steps;
+    }
+    if let Some(checkpoint_every) = args.checkpoint_every {
+        training_config.checkpoint_every = checkpoint_every;
+    }
+    if let Some(log_every) = args.log_every {
+        training_config.log_every = log_every;
+    }
+    if let Some(seed) = args.seed {
+        training_config.seed = seed;
+    }
+}
+
 fn cleanup_stale_best_artifacts(output_dir: &str, component: &str) -> Result<()> {
     match component {
         "policy" => remove_checkpoint_artifact(&Path::new(output_dir).join("policy_best.bin"))?,
@@ -831,6 +917,102 @@ mod tests {
     }
 
     #[test]
+    fn run_train_rejects_invalid_training_overrides() {
+        let dir = temp_train_dir("invalid_training_overrides");
+        let data_dir = dir.join("data");
+        let output_dir = dir.join("runs");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let config = gpc_core::config::GpcConfig {
+            policy: PolicyConfig {
+                obs_dim: 4,
+                action_dim: 2,
+                obs_horizon: 2,
+                pred_horizon: 2,
+                action_horizon: 2,
+                hidden_dim: 8,
+                num_res_blocks: 1,
+                noise_schedule: NoiseScheduleConfig {
+                    num_timesteps: 8,
+                    beta_start: 1e-4,
+                    beta_end: 0.02,
+                },
+            },
+            world_model: WorldModelConfig {
+                state_dim: 4,
+                action_dim: 2,
+                hidden_dim: 8,
+                num_layers: 1,
+                dropout: 0.0,
+            },
+            training: TrainingConfig {
+                num_epochs: 1,
+                batch_size: 2,
+                learning_rate: 1e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+                warmup_steps: 0,
+                checkpoint_every: 1,
+                log_every: 1,
+                seed: 7,
+            },
+            ..Default::default()
+        };
+
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let episodes = vec![Episode {
+            states: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.1, 0.0, 0.0],
+            ],
+            actions: vec![vec![0.1, 0.0], vec![0.1, 0.1]],
+            observations: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.1, 0.0, 0.0],
+            ],
+        }];
+        let episodes_path = data_dir.join("episodes.json");
+        std::fs::write(
+            &episodes_path,
+            serde_json::to_string_pretty(&episodes).unwrap(),
+        )
+        .unwrap();
+
+        let args = TrainArgs {
+            config: Some(config_path.display().to_string()),
+            data: Some(episodes_path.display().to_string()),
+            component: "policy".to_string(),
+            epochs: Some(1),
+            batch_size: Some(1),
+            learning_rate: Some(5e-4),
+            weight_decay: Some(-0.1),
+            grad_clip_norm: Some(0.5),
+            warmup_steps: Some(2),
+            checkpoint_every: Some(1),
+            log_every: Some(1),
+            seed: Some(17),
+            synthetic: false,
+            output: output_dir.display().to_string(),
+            horizon: 2,
+            validation_split: 0.0,
+            report_output: None,
+        };
+
+        let err = run_train(args).expect_err("negative weight decay should be rejected");
+        assert!(
+            err.to_string()
+                .contains("weight_decay must be finite and >= 0")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn run_train_accepts_direct_episodes_file() {
         let dir = temp_train_dir("direct_file_input");
         let data_dir = dir.join("data");
@@ -903,6 +1085,14 @@ mod tests {
             data: Some(episodes_path.display().to_string()),
             component: "policy".to_string(),
             epochs: Some(1),
+            batch_size: Some(1),
+            learning_rate: Some(5e-4),
+            weight_decay: Some(0.0),
+            grad_clip_norm: Some(0.5),
+            warmup_steps: Some(2),
+            checkpoint_every: Some(1),
+            log_every: Some(1),
+            seed: Some(17),
             synthetic: false,
             output: output_dir.display().to_string(),
             horizon: 2,
@@ -925,6 +1115,15 @@ mod tests {
         assert_eq!(report.dataset.total_episodes, 1);
         assert_eq!(report.dataset.train_episodes, 1);
         assert_eq!(report.dataset.validation_episodes, 0);
+        assert_eq!(report.settings.training.num_epochs, 1);
+        assert_eq!(report.settings.training.batch_size, 1);
+        assert_eq!(report.settings.training.learning_rate, 5e-4);
+        assert_eq!(report.settings.training.weight_decay, 0.0);
+        assert_eq!(report.settings.training.grad_clip_norm, 0.5);
+        assert_eq!(report.settings.training.warmup_steps, 2);
+        assert_eq!(report.settings.training.checkpoint_every, 1);
+        assert_eq!(report.settings.training.log_every, 1);
+        assert_eq!(report.settings.training.seed, 17);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -999,6 +1198,7 @@ mod tests {
             horizon: 4,
             validation_split: 0.0,
             report_output: None,
+            ..TrainArgs::default()
         };
 
         run_train(args).unwrap();
@@ -1089,6 +1289,7 @@ mod tests {
             horizon: 4,
             validation_split: 0.0,
             report_output: None,
+            ..TrainArgs::default()
         };
 
         let err =
@@ -1170,6 +1371,7 @@ mod tests {
             horizon: 2,
             validation_split: 0.0,
             report_output: None,
+            ..TrainArgs::default()
         };
 
         let err = run_train(args).expect_err("malformed dataset should be rejected");
@@ -1436,6 +1638,7 @@ mod tests {
             horizon: 2,
             validation_split: 0.5,
             report_output: None,
+            ..TrainArgs::default()
         };
 
         run_train(args).unwrap();
@@ -1583,6 +1786,7 @@ mod tests {
             horizon: 2,
             validation_split: 0.5,
             report_output: Some(custom_report_output.display().to_string()),
+            ..TrainArgs::default()
         };
 
         run_train(args).unwrap();
