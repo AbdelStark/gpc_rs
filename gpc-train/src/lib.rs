@@ -9,7 +9,10 @@ pub mod data;
 pub mod policy_trainer;
 pub mod world_model_trainer;
 
-pub use data::{GpcDataset, GpcDatasetConfig, GpcDatasetSplit};
+pub use data::{
+    DatasetValidationReport, Episode, GpcDataset, GpcDatasetConfig, GpcDatasetSplit,
+    load_episodes_from_path, resolve_dataset_path, validate_episodes,
+};
 pub use policy_trainer::{PolicyTrainer, PolicyTrainingResult, PolicyValidationSummary};
 pub use world_model_trainer::{
     WorldModelTrainer, WorldModelTrainingResult, WorldModelValidationSummary,

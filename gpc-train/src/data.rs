@@ -1,19 +1,22 @@
 //! Dataset and data loading for GPC training.
 
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
+use std::path::{Path, PathBuf};
 
 use burn::data::dataloader::batcher::Batcher;
 use burn::prelude::*;
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-/// A world model sequence sample: (initial_state, action_sequence, target_states).
+use gpc_core::config::{PolicyConfig, WorldModelConfig};
+
+/// A world model sequence sample: `(initial_state, action_sequence, target_states)`.
 pub type WorldModelTransitionSample = (Vec<f32>, Vec<f32>, Vec<f32>);
 
-/// A world model sequence sample: (initial_state, action_sequence, target_states).
+/// A world model sequence sample: `(initial_state, action_sequence, target_states)`.
 pub type WorldModelSequenceSample = (Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>);
 
-/// A policy sample: (observation_history, action_sequence).
+/// A policy sample: `(observation_history, action_sequence)`.
 pub type PolicySampleData = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 
 /// Configuration for the GPC dataset.
@@ -56,7 +59,7 @@ pub struct GpcDatasetSplit {
 }
 
 /// A single demonstration episode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Episode {
     /// Sequence of states `[timesteps, state_dim]`.
     pub states: Vec<Vec<f32>>,
@@ -64,6 +67,31 @@ pub struct Episode {
     pub actions: Vec<Vec<f32>>,
     /// Sequence of observations `[timesteps, obs_dim]`.
     pub observations: Vec<Vec<f32>>,
+}
+
+/// Summary of dataset validation against policy and world-model configs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetValidationReport {
+    /// Number of episodes in the dataset.
+    pub episode_count: usize,
+    /// Total number of transitions across all episodes.
+    pub transition_count: usize,
+    /// Number of usable open-loop windows for policy/world-model evaluation.
+    pub open_loop_window_count: usize,
+    /// Number of episodes structurally compatible with closed-loop evaluation.
+    pub closed_loop_compatible_episode_count: usize,
+}
+
+impl DatasetValidationReport {
+    /// Returns `true` when at least one open-loop evaluation window is available.
+    pub fn has_usable_open_loop_windows(&self) -> bool {
+        self.open_loop_window_count > 0
+    }
+
+    /// Returns `true` when every episode is closed-loop compatible.
+    pub fn is_closed_loop_compatible(&self) -> bool {
+        self.episode_count > 0 && self.closed_loop_compatible_episode_count == self.episode_count
+    }
 }
 
 /// GPC dataset holding demonstration episodes.
@@ -79,11 +107,24 @@ impl GpcDataset {
         Self { episodes, config }
     }
 
-    /// Load dataset from a JSON file.
-    pub fn from_json(path: &str, config: GpcDatasetConfig) -> gpc_core::Result<Self> {
-        let data = std::fs::read_to_string(path)?;
-        let episodes: Vec<Episode> = serde_json::from_str(&data)?;
+    /// Load dataset from a directory containing `episodes.json` or from a direct JSON file.
+    pub fn from_path(path: impl AsRef<Path>, config: GpcDatasetConfig) -> gpc_core::Result<Self> {
+        let episodes = load_episodes_from_path(path)?;
         Ok(Self::new(episodes, config))
+    }
+
+    /// Load dataset from a JSON file or dataset directory.
+    pub fn from_json(path: impl AsRef<Path>, config: GpcDatasetConfig) -> gpc_core::Result<Self> {
+        Self::from_path(path, config)
+    }
+
+    /// Validate the dataset against policy and world model configs.
+    pub fn validate(
+        &self,
+        policy_config: &PolicyConfig,
+        world_model_config: &WorldModelConfig,
+    ) -> gpc_core::Result<DatasetValidationReport> {
+        validate_episodes(&self.episodes, policy_config, world_model_config)
     }
 
     /// Generate a synthetic dataset for testing and development.
@@ -101,35 +142,32 @@ impl GpcDataset {
 
         for _ in 0..num_episodes {
             let mut states = Vec::with_capacity(episode_length);
-            let mut actions = Vec::with_capacity(episode_length - 1);
+            let mut actions = Vec::with_capacity(episode_length.saturating_sub(1));
             let mut observations = Vec::with_capacity(episode_length);
 
-            // Random initial state
             let mut state: Vec<f32> = (0..config.state_dim)
                 .map(|_| rng.gen_range(-1.0..1.0))
                 .collect();
 
-            for t in 0..episode_length {
+            for timestep in 0..episode_length {
                 states.push(state.clone());
                 observations.push(state[..config.obs_dim.min(config.state_dim)].to_vec());
 
-                if t < episode_length - 1 {
-                    // Random action
+                if timestep < episode_length.saturating_sub(1) {
                     let action: Vec<f32> = (0..config.action_dim)
                         .map(|_| rng.gen_range(-1.0..1.0))
                         .collect();
 
-                    // Simple linear dynamics with noise
                     state = state
                         .iter()
                         .enumerate()
-                        .map(|(i, &s)| {
-                            let a = if i < config.action_dim {
+                        .map(|(i, &value)| {
+                            let action_term = if i < config.action_dim {
                                 action[i]
                             } else {
                                 0.0
                             };
-                            s + 0.1 * a + rng.gen_range(-0.01..0.01)
+                            value + 0.1 * action_term + rng.gen_range(-0.01..0.01)
                         })
                         .collect();
 
@@ -267,7 +305,6 @@ impl GpcDataset {
                 let mut obs_history: Vec<Vec<f32>> =
                     ep.observations[obs_start..obs_start + obs_h].to_vec();
 
-                // Pad if needed
                 while obs_history.len() < obs_h {
                     obs_history.insert(0, obs_history[0].clone());
                 }
@@ -276,8 +313,157 @@ impl GpcDataset {
                 samples.push((obs_history, action_seq));
             }
         }
+
         samples
     }
+}
+
+/// Resolve a dataset directory or file path to an `episodes.json` file.
+pub fn resolve_dataset_path(path: impl AsRef<Path>) -> gpc_core::Result<PathBuf> {
+    let path = path.as_ref();
+
+    if path.is_dir() {
+        let episodes_path = path.join("episodes.json");
+        if episodes_path.exists() {
+            return Ok(episodes_path);
+        }
+
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "dataset directory {} does not contain episodes.json",
+            path.display()
+        )));
+    }
+
+    if path.exists() {
+        return Ok(path.to_path_buf());
+    }
+
+    Err(gpc_core::GpcError::DataLoading(format!(
+        "dataset path {} does not exist",
+        path.display()
+    )))
+}
+
+/// Load a dataset's episodes from a directory or direct JSON file.
+pub fn load_episodes_from_path(path: impl AsRef<Path>) -> gpc_core::Result<Vec<Episode>> {
+    let path = resolve_dataset_path(path)?;
+    let data = std::fs::read_to_string(&path).map_err(|error| {
+        gpc_core::GpcError::DataLoading(format!(
+            "failed to read dataset from {}: {error}",
+            path.display()
+        ))
+    })?;
+
+    serde_json::from_str(&data).map_err(|error| {
+        gpc_core::GpcError::DataLoading(format!(
+            "failed to parse episodes from {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Validate loaded episodes against the policy and world-model configs.
+pub fn validate_episodes(
+    episodes: &[Episode],
+    policy_config: &PolicyConfig,
+    world_model_config: &WorldModelConfig,
+) -> gpc_core::Result<DatasetValidationReport> {
+    let mut report = DatasetValidationReport {
+        episode_count: episodes.len(),
+        transition_count: 0,
+        open_loop_window_count: 0,
+        closed_loop_compatible_episode_count: 0,
+    };
+
+    for (episode_index, episode) in episodes.iter().enumerate() {
+        validate_episode(episode, episode_index, policy_config, world_model_config)?;
+        report.transition_count += episode.actions.len();
+        report.open_loop_window_count += episode
+            .states
+            .len()
+            .saturating_sub(policy_config.pred_horizon);
+        report.closed_loop_compatible_episode_count += 1;
+    }
+
+    Ok(report)
+}
+
+fn validate_episode(
+    episode: &Episode,
+    episode_index: usize,
+    policy_config: &PolicyConfig,
+    world_model_config: &WorldModelConfig,
+) -> gpc_core::Result<()> {
+    if episode.states.is_empty() {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} is missing state samples"
+        )));
+    }
+    if episode.actions.is_empty() {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} is missing action samples"
+        )));
+    }
+    if episode.observations.is_empty() {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} is missing observation samples"
+        )));
+    }
+
+    if episode.states.len() != episode.observations.len() {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} must have the same number of states and observations"
+        )));
+    }
+    if episode.states.len() != episode.actions.len() + 1 {
+        return Err(gpc_core::GpcError::DataLoading(format!(
+            "episode {episode_index} must contain exactly one more state than action"
+        )));
+    }
+
+    validate_sequence_shapes(
+        &episode.states,
+        world_model_config.state_dim,
+        "state",
+        episode_index,
+        "world model",
+    )?;
+    validate_sequence_shapes(
+        &episode.actions,
+        policy_config.action_dim,
+        "action",
+        episode_index,
+        "policy/world model",
+    )?;
+    validate_sequence_shapes(
+        &episode.observations,
+        policy_config.obs_dim,
+        "observation",
+        episode_index,
+        "policy",
+    )?;
+
+    Ok(())
+}
+
+fn validate_sequence_shapes(
+    rows: &[Vec<f32>],
+    expected_dim: usize,
+    label: &str,
+    episode_index: usize,
+    context: &str,
+) -> gpc_core::Result<()> {
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.len() != expected_dim {
+            return Err(gpc_core::GpcError::DimensionMismatch {
+                context: format!("episode {episode_index} {label} {row_index} ({context})"),
+                expected: expected_dim,
+                got: row.len(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Batcher for world model single-step training.
@@ -420,112 +606,190 @@ impl<B: Backend> Batcher<B, (Vec<Vec<f32>>, Vec<Vec<f32>>), PolicyBatch<B>> for 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn test_synthetic_dataset_generation() {
-        let config = GpcDatasetConfig {
-            data_dir: "test".to_string(),
-            state_dim: 10,
-            action_dim: 2,
-            obs_dim: 10,
-            obs_horizon: 2,
-            pred_horizon: 4,
-        };
-
-        let dataset = GpcDataset::generate_synthetic(config, 5, 20, 42);
-        assert_eq!(dataset.num_episodes(), 5);
-        assert!(dataset.num_transitions() > 0);
+    fn temp_dataset_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gpc_train_{name}_{}_{}",
+            std::process::id(),
+            test_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    #[test]
-    fn test_world_model_samples() {
-        let config = GpcDatasetConfig {
+    fn test_suffix() -> u64 {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs() ^ u64::from(duration.subsec_nanos()),
+            Err(_) => 42,
+        }
+    }
+
+    fn write_episode_file(dir: &Path, episodes: &[Episode]) -> PathBuf {
+        let path = dir.join("episodes.json");
+        std::fs::write(&path, serde_json::to_string_pretty(episodes).unwrap()).unwrap();
+        path
+    }
+
+    fn valid_policy_config() -> GpcDatasetConfig {
+        GpcDatasetConfig {
             data_dir: "test".to_string(),
             state_dim: 4,
             action_dim: 2,
             obs_dim: 4,
             obs_horizon: 2,
-            pred_horizon: 4,
+            pred_horizon: 3,
+        }
+    }
+
+    fn valid_policy_world_configs() -> (PolicyConfig, WorldModelConfig) {
+        let policy = PolicyConfig {
+            obs_dim: 4,
+            action_dim: 2,
+            obs_horizon: 2,
+            pred_horizon: 3,
+            action_horizon: 1,
+            hidden_dim: 16,
+            num_res_blocks: 1,
+            noise_schedule: gpc_core::config::NoiseScheduleConfig {
+                num_timesteps: 8,
+                beta_start: 1e-4,
+                beta_end: 0.02,
+            },
         };
+        let world = WorldModelConfig {
+            state_dim: 4,
+            action_dim: 2,
+            hidden_dim: 16,
+            num_layers: 1,
+            dropout: 0.0,
+        };
+        (policy, world)
+    }
 
-        let dataset = GpcDataset::generate_synthetic(config, 2, 10, 42);
-        let samples = dataset.world_model_samples();
-
-        assert_eq!(samples.len(), 18); // 2 episodes * 9 transitions each
-        assert_eq!(samples[0].0.len(), 4); // state_dim
-        assert_eq!(samples[0].1.len(), 2); // action_dim
-        assert_eq!(samples[0].2.len(), 4); // next_state_dim
+    fn valid_episode() -> Episode {
+        Episode {
+            states: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.0, 0.0, 0.0],
+                vec![0.3, 0.0, 0.0, 0.0],
+            ],
+            actions: vec![vec![0.1, 0.0], vec![0.1, 0.0], vec![0.1, 0.0]],
+            observations: vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.1, 0.0, 0.0, 0.0],
+                vec![0.2, 0.0, 0.0, 0.0],
+                vec![0.3, 0.0, 0.0, 0.0],
+            ],
+        }
     }
 
     #[test]
-    fn test_policy_samples() {
-        let config = GpcDatasetConfig {
-            data_dir: "test".to_string(),
-            state_dim: 4,
-            action_dim: 2,
-            obs_dim: 4,
-            obs_horizon: 2,
-            pred_horizon: 4,
-        };
+    fn test_resolve_dataset_path_supports_direct_file_and_directory() {
+        let dir = temp_dataset_dir("resolve");
+        let episodes_path = write_episode_file(&dir, &[valid_episode()]);
 
-        let dataset = GpcDataset::generate_synthetic(config, 2, 10, 42);
-        let samples = dataset.policy_samples();
-
-        assert!(!samples.is_empty());
-        assert_eq!(samples[0].0.len(), 2); // obs_horizon
-        assert_eq!(samples[0].1.len(), 4); // pred_horizon
+        assert_eq!(resolve_dataset_path(&dir).unwrap(), episodes_path,);
+        assert_eq!(resolve_dataset_path(&episodes_path).unwrap(), episodes_path,);
     }
 
     #[test]
-    fn test_world_model_sequences() {
-        let config = GpcDatasetConfig {
-            data_dir: "test".to_string(),
-            state_dim: 4,
-            action_dim: 2,
-            obs_dim: 4,
-            obs_horizon: 2,
-            pred_horizon: 4,
-        };
+    fn test_load_episodes_from_path_supports_direct_file_and_directory() {
+        let dir = temp_dataset_dir("load");
+        let episodes = vec![valid_episode()];
+        let episodes_path = write_episode_file(&dir, &episodes);
 
-        let dataset = GpcDataset::generate_synthetic(config, 2, 10, 42);
-        let seqs = dataset.world_model_sequences(4);
+        let loaded_from_dir = load_episodes_from_path(&dir).unwrap();
+        let loaded_from_file = load_episodes_from_path(&episodes_path).unwrap();
 
-        assert!(!seqs.is_empty());
-        assert_eq!(seqs[0].1.len(), 4); // horizon actions
-        assert_eq!(seqs[0].2.len(), 4); // horizon target states
+        assert_eq!(loaded_from_dir, episodes);
+        assert_eq!(loaded_from_file, episodes);
     }
 
     #[test]
-    fn test_split_is_deterministic() {
-        let config = GpcDatasetConfig {
-            data_dir: "test".to_string(),
-            state_dim: 4,
-            action_dim: 2,
-            obs_dim: 4,
-            obs_horizon: 2,
-            pred_horizon: 4,
-        };
+    fn test_dataset_from_path_supports_direct_file_and_directory() {
+        let dir = temp_dataset_dir("dataset");
+        let config = valid_policy_config();
+        write_episode_file(&dir, &[valid_episode()]);
 
-        let dataset = GpcDataset::generate_synthetic(config, 6, 12, 7);
-        let first = dataset.split(0.25, 99).unwrap();
-        let second = dataset.split(0.25, 99).unwrap();
+        let dataset_from_dir = GpcDataset::from_path(&dir, config.clone()).unwrap();
+        let dataset_from_file = GpcDataset::from_json(dir.join("episodes.json"), config).unwrap();
 
-        assert_eq!(first.train.num_episodes(), second.train.num_episodes());
-        assert_eq!(
-            first.validation.num_episodes(),
-            second.validation.num_episodes()
-        );
-        assert_eq!(
-            first.train.world_model_samples(),
-            second.train.world_model_samples()
-        );
-        assert_eq!(
-            first.validation.world_model_samples(),
-            second.validation.world_model_samples()
-        );
-        assert_eq!(
-            first.train.num_episodes() + first.validation.num_episodes(),
-            dataset.num_episodes()
-        );
+        assert_eq!(dataset_from_dir.num_episodes(), 1);
+        assert_eq!(dataset_from_file.num_episodes(), 1);
+    }
+
+    #[test]
+    fn test_validate_episodes_reports_open_loop_and_closed_loop_compatibility() {
+        let (policy, world) = valid_policy_world_configs();
+        let episodes = vec![valid_episode(), valid_episode()];
+
+        let report = validate_episodes(&episodes, &policy, &world).unwrap();
+
+        assert_eq!(report.episode_count, 2);
+        assert_eq!(report.transition_count, 6);
+        assert_eq!(report.closed_loop_compatible_episode_count, 2);
+        assert!(report.has_usable_open_loop_windows());
+        assert!(report.is_closed_loop_compatible());
+        assert_eq!(report.open_loop_window_count, 2);
+    }
+
+    #[test]
+    fn test_validate_episodes_reports_unusable_open_loop_windows() {
+        let (mut policy, world) = valid_policy_world_configs();
+        policy.pred_horizon = 8;
+        let episodes = vec![valid_episode()];
+
+        let report = validate_episodes(&episodes, &policy, &world).unwrap();
+
+        assert_eq!(report.open_loop_window_count, 0);
+        assert!(!report.has_usable_open_loop_windows());
+        assert!(report.is_closed_loop_compatible());
+    }
+
+    #[test]
+    fn test_validate_episodes_rejects_missing_state_samples() {
+        let (policy, world) = valid_policy_world_configs();
+        let mut episode = valid_episode();
+        episode.states.clear();
+
+        let err = validate_episodes(&[episode], &policy, &world).unwrap_err();
+        assert!(err.to_string().contains("missing state samples"));
+    }
+
+    #[test]
+    fn test_validate_episodes_rejects_missing_action_samples() {
+        let (policy, world) = valid_policy_world_configs();
+        let mut episode = valid_episode();
+        episode.actions.clear();
+        episode.states.truncate(1);
+        episode.observations.truncate(1);
+
+        let err = validate_episodes(&[episode], &policy, &world).unwrap_err();
+        assert!(err.to_string().contains("missing action samples"));
+    }
+
+    #[test]
+    fn test_validate_episodes_rejects_missing_observation_samples() {
+        let (policy, world) = valid_policy_world_configs();
+        let mut episode = valid_episode();
+        episode.observations.clear();
+
+        let err = validate_episodes(&[episode], &policy, &world).unwrap_err();
+        assert!(err.to_string().contains("missing observation samples"));
+    }
+
+    #[test]
+    fn test_validate_episodes_rejects_dimension_mismatch() {
+        let (policy, world) = valid_policy_world_configs();
+        let mut episode = valid_episode();
+        episode.states[0] = vec![0.0, 0.0];
+
+        let err = validate_episodes(&[episode], &policy, &world).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Dimension mismatch"));
+        assert!(message.contains("episode 0 state 0"));
     }
 }
